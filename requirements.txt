@@ -1,0 +1,9 @@
+# Core framework
+fastapi>=0.111.0
+uvicorn[standard]>=0.29.0
+
+# Claude Code Agent SDK
+claude-agent-sdk
+
+# Async support (already used by claude_agent_sdk)
+anyio>=4.0.0
