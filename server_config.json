@@ -1,0 +1,73 @@
+{
+  "server": {
+    "host": "0.0.0.0",
+    "port": 8880,
+    "cors_origins": ["http://localhost:3000", "http://127.0.0.1:3000"]
+  },
+  "client_auth": {
+    "enabled": false,
+    "keys_file": null,
+    "clock_skew_seconds": 60,
+    "nonce_ttl_seconds": 300,
+    "max_requests_per_minute": 120
+  },
+  "cost_guard": {
+    "max_ai_tasks_per_client_minute": 10,
+    "max_ai_tasks_per_client_day": 200,
+    "max_ai_tasks_global_day": 1000
+  },
+  "web_gateway": {
+    "require_same_origin": true,
+    "cookie_secure": false,
+    "trusted_proxy_ips": ["127.0.0.1", "::1"],
+    "max_requests_per_session_minute": 120,
+    "max_requests_per_ip_minute": 300,
+    "max_ai_tasks_per_session_minute": 3,
+    "max_ai_tasks_per_session_day": 20,
+    "max_ai_tasks_per_ip_day": 100
+  },
+  "storage": {
+    "data_dir": "./projects_data_v3"
+  },
+  "claude": {
+    "model": null,
+    "fallback_model": null,
+    "max_turns": 20,
+    "max_budget_usd": null,
+    "effort": "high",
+    "permission_mode": "dontAsk",
+    "sandbox_enabled": true,
+    "allowed_tools": ["Read", "Write", "Edit", "Glob", "Grep", "Bash"],
+    "skills": ["uiflow2-coder", "m5stack-assistant", "aiflow-device-push"]
+  },
+  "skills": {
+    "directory": "./skills"
+  },
+  "mcp": {
+    "m5stack_enabled": true,
+    "m5stack_url": "https://mcp.m5stack.com/sse"
+  },
+  "device_push": {
+    "base_url": "https://ai-flow.m5stack.com/",
+    "timeout_seconds": 120
+  },
+  "capacity": {
+    "max_sessions": 100,
+    "session_active_window_seconds": 60,
+    "max_concurrent_tasks": 4,
+    "max_queued_tasks": 20
+  },
+  "tasks": {
+    "heartbeat_seconds": 10,
+    "agent_stall_seconds": 120,
+    "event_retention": 10000
+  },
+  "uploads": {
+    "max_bytes": 10485760
+  },
+  "messages": {
+    "max_attachments": 6,
+    "max_attachment_bytes": 10485760,
+    "max_total_bytes": 20971520
+  }
+}

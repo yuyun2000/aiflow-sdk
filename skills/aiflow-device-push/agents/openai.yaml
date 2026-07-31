@@ -1,0 +1,4 @@
+interface:
+  display_name: "AIFlow Device Push"
+  short_description: "Push UIFlow2 code and resources to M5Stack devices"
+  default_prompt: "Use $aiflow-device-push to validate and deploy this UIFlow2 code and its resource files to the configured device."

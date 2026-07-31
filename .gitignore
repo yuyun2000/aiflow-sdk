@@ -1,0 +1,13 @@
+.DS_Store
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.runtime/
+projects_data/
+projects_data_v3/
+server_config.local.json
+.env.local
+.env.*.local
+client-keys.json
+*.client-keys.json

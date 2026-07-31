@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>AIFlow Device Coding</title>
+  <link rel="stylesheet" href="/client-assets/app.css?v=20260731-stream-perf">
+  <script src="/client-assets/assistant-stream.js?v=20260731-stream-perf" defer></script>
+  <script src="/client-assets/app.js?v=20260731-stream-perf" defer></script>
+</head>
+<body>
+  <header class="app-header">
+    <div class="brand" aria-label="AIFlow Device Coding">
+      <span class="brand-mark" aria-hidden="true">AF</span>
+      <span>
+        <strong>AIFlow</strong>
+        <small>Device Coding</small>
+      </span>
+    </div>
+    <div class="service-strip" aria-live="polite">
+      <span class="status-dot" id="health-dot"></span>
+      <span id="health-label">正在连接服务</span>
+      <span class="strip-divider"></span>
+      <span id="model-label">model: --</span>
+      <span class="strip-divider"></span>
+      <span id="capacity-label">task: --</span>
+    </div>
+  </header>
+
+  <main>
+    <section class="connect-band" aria-labelledby="connect-title">
+      <div class="section-heading">
+        <div>
+          <span class="step-label">01</span>
+          <h1 id="connect-title">设备项目</h1>
+        </div>
+        <span class="connection-state" id="connection-state">未连接</span>
+      </div>
+
+      <form id="device-form" class="connect-form">
+        <label class="field field-grow">
+          <span>Device ID</span>
+          <input id="device-id" name="deviceId" autocomplete="off" required maxlength="256" placeholder="输入客户端配对得到的 deviceId">
+        </label>
+        <label class="field field-grow">
+          <span>Client ID</span>
+          <input id="client-id" name="clientId" autocomplete="off" required maxlength="256" placeholder="输入客户端生成的 clientId">
+        </label>
+        <label class="field product-field">
+          <span>产品</span>
+          <input id="product" name="product" autocomplete="off" maxlength="200" placeholder="CoreS3">
+        </label>
+        <button class="button primary connect-button" id="connect-button" type="submit">连接项目</button>
+      </form>
+      <div class="inline-error" id="connect-error" role="alert" hidden></div>
+    </section>
+
+    <div class="workspace" id="workspace" aria-disabled="true">
+      <div class="primary-column">
+        <section class="work-section" aria-labelledby="coding-title">
+          <div class="section-heading compact">
+            <div>
+              <span class="step-label">02</span>
+              <h2 id="coding-title">Coding</h2>
+            </div>
+            <span class="task-state" id="task-state">等待任务</span>
+          </div>
+
+          <form id="coding-form">
+            <label class="field prompt-field">
+              <span>需求</span>
+              <textarea id="prompt" name="prompt" maxlength="30000" rows="8" placeholder="描述要编写或修改的 UIFlow2 程序"></textarea>
+            </label>
+
+            <div class="mode-row">
+              <fieldset class="segmented" id="deploy-modes">
+                <legend>完成后</legend>
+                <label>
+                  <input type="radio" name="deployMode" value="none" checked>
+                  <span>只生成代码</span>
+                </label>
+                <label>
+                  <input type="radio" name="deployMode" value="server">
+                  <span>服务端推送</span>
+                </label>
+                <label>
+                  <input type="radio" name="deployMode" value="agent">
+                  <span>Agent 推送</span>
+                </label>
+              </fieldset>
+            </div>
+
+            <div class="attachment-row">
+              <label class="file-picker">
+                <input id="image-input" type="file" accept="image/png,image/jpeg,image/bmp,image/gif,image/webp" multiple>
+                <span>添加图片</span>
+              </label>
+              <label class="file-picker">
+                <input id="audio-input" type="file" accept="audio/wav,audio/x-wav,audio/mpeg,audio/mp4,audio/ogg,audio/amr" multiple>
+                <span>添加语音</span>
+              </label>
+              <div class="attachment-summary" id="attachment-summary">未选择附件</div>
+            </div>
+
+            <div class="action-row">
+              <button class="button primary" id="submit-button" type="submit">生成代码</button>
+              <button class="button danger" id="cancel-button" type="button" disabled>取消任务</button>
+              <span class="inline-error" id="coding-error" role="alert" hidden></span>
+            </div>
+          </form>
+        </section>
+
+        <section class="work-section task-section" aria-labelledby="task-title">
+          <div class="section-heading compact">
+            <div>
+              <span class="step-label">03</span>
+              <h2 id="task-title">任务</h2>
+            </div>
+            <button class="icon-button" id="refresh-task" type="button" title="刷新任务" aria-label="刷新任务" disabled>&#8635;</button>
+          </div>
+
+          <div class="task-meta">
+            <span id="task-stage">等待任务</span>
+            <span id="queue-position"></span>
+          </div>
+          <div class="activity-grid">
+            <div class="activity-panel runtime-panel" aria-labelledby="runtime-title">
+              <div class="activity-heading">
+                <h3 id="runtime-title">运行状态</h3>
+                <span class="activity-summary" id="runtime-summary">等待任务</span>
+              </div>
+              <ol class="event-log runtime-log" id="runtime-log" aria-live="polite">
+                <li class="empty-row">暂无运行状态</li>
+              </ol>
+            </div>
+
+            <div class="activity-panel agent-panel" aria-labelledby="agent-title">
+              <div class="activity-heading">
+                <h3 id="agent-title">Agent 工作记录</h3>
+              </div>
+              <ol class="event-log agent-log" id="agent-log" aria-live="polite">
+                <li class="empty-row">暂无 Agent 活动</li>
+              </ol>
+            </div>
+
+            <div class="activity-panel raw-stream-panel" aria-labelledby="raw-stream-title">
+              <div class="activity-heading">
+                <h3 id="raw-stream-title">SSE 原始事件流</h3>
+                <span class="activity-summary" id="raw-summary">等待事件</span>
+              </div>
+              <pre class="raw-stream" id="raw-stream" aria-live="off">暂无 SSE 事件</pre>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <aside class="project-column" aria-labelledby="files-title">
+        <section class="project-section">
+          <div class="section-heading compact">
+            <div>
+              <span class="step-label">04</span>
+              <h2 id="files-title">项目文件</h2>
+            </div>
+            <button class="icon-button" id="refresh-project" type="button" title="刷新项目" aria-label="刷新项目" disabled>&#8635;</button>
+          </div>
+
+          <div class="project-actions">
+            <button class="button secondary" id="rerun-button" type="button" disabled>直接运行 main.py</button>
+            <label class="file-picker compact-picker">
+              <input id="project-file-input" type="file">
+              <span>上传文件</span>
+            </label>
+          </div>
+          <ul class="file-list" id="file-list">
+            <li class="empty-row">连接后显示项目文件</li>
+          </ul>
+        </section>
+
+        <section class="project-section session-section" aria-labelledby="session-title">
+          <div class="section-heading compact">
+            <div>
+              <span class="step-label">05</span>
+              <h2 id="session-title">会话</h2>
+            </div>
+            <button class="button text-button" id="reset-button" type="button" disabled>新会话</button>
+          </div>
+          <dl class="session-meta">
+            <div><dt>Device</dt><dd id="active-device">--</dd></div>
+            <div><dt>Client</dt><dd id="active-client">--</dd></div>
+            <div><dt>Conversation</dt><dd id="conversation-id">--</dd></div>
+            <div><dt>Claude session</dt><dd id="claude-session">--</dd></div>
+          </dl>
+        </section>
+      </aside>
+    </div>
+  </main>
+
+  <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+</body>
+</html>
