@@ -38,9 +38,10 @@ X-AIFlow-Context-Token: ctx_secret_...
 ANTHROPIC_BASE_URL="https://your-provider.example.com"
 ANTHROPIC_AUTH_TOKEN="your-bearer-token"
 AIFLOW_CLAUDE_MODEL="your-provider-model-id"
+AIFLOW_CLAUDE_SUPPORTS_IMAGE_INPUT="false"
 ```
 
-使用 `x-api-key` 的提供方将 `ANTHROPIC_AUTH_TOKEN` 替换为 `ANTHROPIC_API_KEY`。两种认证变量不要同时设置。`AIFLOW_CLAUDE_MODEL` 优先于 `server_config.json -> claude.model`；密钥不属于 V3 HTTP 请求，网页客户端也不能读取或修改它。
+使用 `x-api-key` 的提供方将 `ANTHROPIC_AUTH_TOKEN` 替换为 `ANTHROPIC_API_KEY`。两种认证变量不要同时设置。`AIFLOW_CLAUDE_MODEL` 优先于 `server_config.json -> claude.model`；DeepSeek 等不支持图片输入的模型应设置 `AIFLOW_CLAUDE_SUPPORTS_IMAGE_INPUT=false`，该变量优先于 `server_config.json -> claude.supports_image_input`。密钥不属于 V3 HTTP 请求，网页客户端也不能读取或修改它。
 
 仓库根目录的 `manage.sh` 默认加载 `.env.local`，也可由 `AIFLOW_ENV_FILE` 指定其他文件。使用 `./manage.sh config` 做脱敏检查。第三方端必须兼容 Anthropic Messages API，纯 OpenAI Chat Completions 代理不能直接作为此 URL。
 
@@ -164,7 +165,7 @@ AIFLOW_CLAUDE_MODEL="your-provider-model-id"
 }
 ```
 
-图片和语音使用原始 Base64 字符串，不使用 Data URL：
+从 API `3.4` 开始，图片和语音由客户端提供必填文件名，并使用原始 Base64 字符串，不使用 Data URL：
 
 ```json
 {
@@ -187,19 +188,26 @@ AIFLOW_CLAUDE_MODEL="your-provider-model-id"
 }
 ```
 
-允许纯文字、纯附件或混合消息，不能三者都为空。支持 MIME：
+允许纯文字、纯附件或混合消息，不能全部为空。附件字段：
 
-- 图片：`image/png`、`image/jpeg`、`image/bmp`、`image/gif`、`image/webp`。
-- 语音：`audio/wav`、`audio/x-wav`、`audio/mpeg`、`audio/mp4`、`audio/ogg`、`audio/amr`。
+- `kind`：必填，`image` 或 `audio`。
+- `mime_type`：必填，附件实际媒体类型。
+- `name`：必填，客户端希望下游 Agent 使用的文件名。只能是单个文件名，不能包含 `/`、`\\`，不能是 `.` 或 `..`，也不能带首尾空白或控制字符。
+- `data_base64`：必填，文件内容的原始 Base64。
 
-服务端先校验 Base64、MIME、数量和大小，再写入：
+支持的 MIME 与文件扩展名：
+
+- 图片：`image/png -> .png`、`image/jpeg -> .jpg/.jpeg`、`image/bmp -> .bmp`、`image/gif -> .gif`、`image/webp -> .webp`。
+- 语音：`audio/wav` 或 `audio/x-wav -> .wav`、`audio/mpeg -> .mp3`、`audio/mp4 -> .m4a/.mp4`、`audio/ogg -> .ogg`、`audio/amr -> .amr`。
+
+服务端先校验文件名、Base64、MIME、数量和大小，再按客户端名称写入：
 
 ```text
-inputs/<conversation_id>/<task_id>/image-01.png
-inputs/<conversation_id>/<task_id>/audio-02.wav
+inputs/<conversation_id>/<task_id>/screen.png
+inputs/<conversation_id>/<task_id>/question.wav
 ```
 
-Agent 收到相对路径并可用工作区工具读取。SQLite 任务请求只保存类型、MIME、路径、大小和原始名称，不保存 Base64。限制由 `messages.max_attachments`、`messages.max_attachment_bytes` 和 `messages.max_total_bytes` 配置。
+同一消息内的文件名按 Unicode 规范化和大小写折叠后不能重复，避免在不同文件系统中发生静默覆盖。Agent 收到含客户端文件名的相对路径。`claude.supports_image_input=true`（默认）时可按任务需要读取图片；设为 `false` 时，服务通过 SDK `PreToolUse` 拒绝图片 `Read`，同时提示 Agent 只能把图片作为不透明 UIFlow2 资源按路径引用或写入部署清单，不能解码、OCR、描述或猜测内容。SQLite 任务请求只保存类型、MIME、路径、大小和名称，不保存 Base64。限制由 `messages.max_attachments`、`messages.max_attachment_bytes` 和 `messages.max_total_bytes` 配置。
 
 Agent 仅处理 M5Stack UIFlow2/MicroPython 编程任务。编写或确认 UIFlow2 代码时优先建议使用 `uiflow2-coder`，但服务端不强制工具调用顺序；需要产品规格、屏幕、按键、引脚、电气特性、兼容性或排障依据时，可以直接先使用 `m5stack-assistant` 查询官方 MCP。确认官方资料或工具存在重大问题时，Agent 按 Skill 规则提交 `knowledge_feedback`，并以返回的 `feedback_id` 作为成功依据。
 
@@ -250,6 +258,8 @@ max_concurrent_tasks + max_queued_tasks
 ```
 
 `include_resources=true` 会读取 `.aiflow/deploy.json` 中的非代码资源；如果清单误把本次 `code_path` 列为资源，服务端会自动排除该项，代码仍只发送到代码接口。
+
+资源项的 `devicePath` 是相对设备 Flash 根目录的目录，例如 `res/img/` 或 `res/audio/`，不能包含资源文件名。它与 UIFlow 运行时的 `/flash/res/img/...`、`file://flash/res/audio/...` 表示同一位置；省略时由上传接口按扩展名自动分配。代码和资源都不能引用工作区的 `.claude`、`.aiflow` 或 `.git` 内部文件。
 
 该任务使用同一并发槽和队列限制。
 
@@ -331,10 +341,14 @@ queued -> running -> completed
 | `200` | - | 查询、重连或同步操作成功 |
 | `201` | - | 新设备项目或文件已创建 |
 | `202` | - | 后台任务已进入执行/等待容量 |
-| `400` | `invalid_attachment_base64` 等 | 文件、路径或附件格式错误 |
+| `400` | `invalid_attachment_name` | 附件名称不是安全的单个文件名 |
+| `400` | `duplicate_attachment_name` | 同一消息内存在重复附件名 |
+| `400` | `attachment_extension_mismatch` | 附件扩展名与 MIME 不匹配 |
+| `400` | `invalid_attachment_base64` 等 | 文件、路径或附件内容格式错误 |
 | `401` | `invalid_context_token` | 能力令牌缺失、失效或已被重连轮换 |
 | `409` | `context_busy` | 同一设备已有活跃任务 |
 | `413` | `attachment_too_large` 等 | 上传或 Base64 附件超过限制 |
+| `422` | 请求校验错误 | 缺少必填附件 `name` 等字段 |
 | `422` | `device_target_missing` 等 | 部署前验证失败 |
 | `403` | `cross_site_request_rejected` | 匿名修改请求不是同源或允许的 Origin |
 | `429` | `web_rate_limit_*` | 匿名会话或来源 IP 限额触发；响应包含 `Retry-After` 和 `retry_after_seconds` |

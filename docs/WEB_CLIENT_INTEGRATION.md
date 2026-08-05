@@ -109,6 +109,8 @@ async function fileToAttachment(file, kind) {
 
 浏览器应在编码前检查 `/api/v3/capabilities` 返回的附件数量、单文件和总大小限制，避免无意义地生成大字符串。
 
+`name` 必须由客户端提供，服务端会按该名称保存并把相对路径交给 Agent。只传 `File.name` 这样的单个文件名，不要传本地绝对路径或目录；扩展名必须与 `mime_type` 一致，同一消息内的名称不能重复（忽略大小写和 Unicode 等价形式）。
+
 ## 5. 提交 Coding
 
 ```js
@@ -129,7 +131,7 @@ async function startCoding(deviceId, { text = "", images = [], audio = [], deplo
 }
 ```
 
-支持纯文字、纯图片/语音或混合消息。服务端解码后保存到当前设备项目的 `inputs/`，并把相对路径传给 Agent。前端不需要再单独上传同一附件。
+支持纯文字、纯图片/语音或混合消息。服务端解码后以客户端提供的 `name` 保存到当前设备项目的 `inputs/<conversation_id>/<task_id>/`，并把含该文件名的相对路径传给 Agent。前端不需要再单独上传同一附件。
 
 按钮建议：
 
@@ -277,5 +279,7 @@ async function apiError(response) {
 - `task_queue_full`：执行和等待容量都满；等待后重试，不要自动高频循环。
 - `context_busy`：恢复返回的 `task_id`，不要创建同设备第二个任务。
 - `invalid_context_token`：重新用同一 `deviceId` 连接并替换令牌。
-- `invalid_attachment_base64` / `unsupported_attachment_type`：在前端检查编码和 MIME。
+- `invalid_attachment_name` / `duplicate_attachment_name`：只传单个文件名，并在提交前检查消息内重名。
+- `attachment_extension_mismatch` / `unsupported_attachment_type`：检查文件扩展名和 MIME 的对应关系。
+- `invalid_attachment_base64`：检查 Base64 编码。
 - `attachment_too_large` / `attachments_too_large`：按 capabilities 限制重新选择文件。

@@ -194,6 +194,17 @@ def test_built_in_web_client_is_served(service):
     assert "ANTHROPIC_AUTH_TOKEN" not in page.text + script.text
 
 
+def test_attachment_name_is_required_in_openapi(service):
+    client, _, _, _ = service
+    response = client.get("/openapi.json")
+    assert response.status_code == 200
+    attachment_schema = response.json()["components"]["schemas"]["Base64Attachment"]
+    assert "name" in attachment_schema["required"]
+    assert attachment_schema["properties"]["name"]["description"] == (
+        "Client-provided file name used when the attachment is saved"
+    )
+
+
 def test_context_isolation_background_status_and_events(service):
     client, app, runner, _ = service
     first, first_headers = create_context(client, "aa")
@@ -516,7 +527,7 @@ def test_global_concurrency_and_queue_limit(tmp_path):
         assert runner.max_active == 2
 
 
-def test_base64_image_and_audio_are_saved_without_persisting_payload(service):
+def test_base64_image_and_audio_use_client_names_without_persisting_payload(service):
     client, app, runner, _ = service
     context, headers = create_context(client, "media")
     image_bytes = b"\x89PNG\r\n\x1a\nmock-image"
@@ -550,6 +561,8 @@ def test_base64_image_and_audio_are_saved_without_persisting_payload(service):
 
     saved = runner.calls[0][4]
     assert [item["kind"] for item in saved] == ["image", "audio"]
+    assert [Path(item["path"]).name for item in saved] == ["screen.png", "question.wav"]
+    assert [item["name"] for item in saved] == ["screen.png", "question.wav"]
     workspace = app.state.workspaces.workspace_for(context["context_id"])
     assert workspace.joinpath(saved[0]["path"]).read_bytes() == image_bytes
     assert workspace.joinpath(saved[1]["path"]).read_bytes() == audio_bytes
@@ -561,9 +574,90 @@ def test_base64_image_and_audio_are_saved_without_persisting_payload(service):
         headers=headers,
         json={
             "attachments": [
-                {"kind": "image", "mime_type": "image/png", "data_base64": "not-base64"}
+                {
+                    "kind": "image",
+                    "mime_type": "image/png",
+                    "name": "invalid.png",
+                    "data_base64": "not-base64",
+                }
             ]
         },
     )
     assert invalid.status_code == 400
     assert invalid.json()["detail"]["code"] == "invalid_attachment_base64"
+
+
+@pytest.mark.parametrize(
+    ("name", "mime_type", "expected_code"),
+    [
+        ("../screen.png", "image/png", "invalid_attachment_name"),
+        ("assets/screen.png", "image/png", "invalid_attachment_name"),
+        ("screen.jpg", "image/png", "attachment_extension_mismatch"),
+    ],
+)
+def test_attachment_names_reject_paths_and_mime_mismatches(
+    service, name, mime_type, expected_code
+):
+    client, _, _, _ = service
+    _, headers = create_context(client, expected_code)
+    response = client.post(
+        "/api/v3/tasks/coding",
+        headers=headers,
+        json={
+            "attachments": [
+                {
+                    "kind": "image",
+                    "mime_type": mime_type,
+                    "name": name,
+                    "data_base64": base64.b64encode(b"image").decode("ascii"),
+                }
+            ]
+        },
+    )
+    assert response.status_code == 400
+    assert response.json()["detail"]["code"] == expected_code
+
+
+def test_attachment_name_is_required_and_unique_per_message(service):
+    client, _, _, _ = service
+    _, headers = create_context(client, "attachment-name")
+    encoded = base64.b64encode(b"image").decode("ascii")
+
+    missing = client.post(
+        "/api/v3/tasks/coding",
+        headers=headers,
+        json={
+            "attachments": [
+                {
+                    "kind": "image",
+                    "mime_type": "image/png",
+                    "data_base64": encoded,
+                }
+            ]
+        },
+    )
+    assert missing.status_code == 422
+    assert missing.json()["detail"][0]["loc"][-1] == "name"
+
+    duplicate = client.post(
+        "/api/v3/tasks/coding",
+        headers=headers,
+        json={
+            "attachments": [
+                {
+                    "kind": "image",
+                    "mime_type": "image/png",
+                    "name": "screen.png",
+                    "data_base64": encoded,
+                },
+                {
+                    "kind": "image",
+                    "mime_type": "image/png",
+                    "name": "SCREEN.PNG",
+                    "data_base64": encoded,
+                },
+            ]
+        },
+    )
+    assert duplicate.status_code == 400
+    assert duplicate.json()["detail"]["code"] == "duplicate_attachment_name"

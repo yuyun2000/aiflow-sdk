@@ -32,6 +32,7 @@
   "claude": {
     "model": null,
     "fallback_model": null,
+    "supports_image_input": true,
     "max_turns": 20,
     "max_budget_usd": null,
     "effort": "high",

@@ -7,6 +7,7 @@ import os
 import shutil
 import subprocess
 import sys
+import unicodedata
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 from urllib.parse import quote, urlencode, urlsplit, urlunsplit
@@ -145,10 +146,33 @@ def normalize_device_path(value: str) -> str:
     normalized = value.strip().replace("\\", "/")
     if not normalized:
         return ""
-    segments = [segment for segment in normalized.split("/") if segment]
+    if any(ord(character) < 32 or ord(character) == 127 for character in normalized):
+        raise PushError("device directory must not contain control characters")
+
+    flash_prefixes = ("file:///flash/", "file://flash/", "/flash/", "flash/")
+    flash_relative = False
+    for prefix in flash_prefixes:
+        if normalized.startswith(prefix):
+            normalized = normalized[len(prefix):].lstrip("/")
+            flash_relative = True
+            break
+    else:
+        sd_prefixes = ("file:///sd/", "file://sd/")
+        for prefix in sd_prefixes:
+            if normalized.startswith(prefix):
+                normalized = "/sd/" + normalized[len(prefix):].lstrip("/")
+                break
+        if ":" in normalized.split("/", 1)[0]:
+            raise PushError("device directory must not use an unsupported URI scheme")
+
+    raw_segments = normalized.split("/")
+    segments = [segment for segment in raw_segments if segment]
     if any(segment in {".", ".."} for segment in segments):
         raise PushError("device directory must not contain . or .. path segments")
-    return normalized.rstrip("/") + "/"
+    if not segments:
+        raise PushError("device directory must not be empty after normalization")
+    leading_slash = normalized.startswith("/") and not flash_relative
+    return ("/" if leading_slash else "") + "/".join(segments) + "/"
 
 
 def validate_resources(values: Sequence[str]) -> List[Dict[str, Any]]:
@@ -157,9 +181,13 @@ def validate_resources(values: Sequence[str]) -> List[Dict[str, Any]]:
     total_size = 0
 
     for value in values:
-        local_value, separator, device_value = value.rpartition("::")
-        if not separator:
+        literal_path = Path(value).expanduser()
+        if literal_path.is_file():
             local_value, device_value = value, ""
+        else:
+            local_value, separator, device_value = value.rpartition("::")
+            if not separator:
+                local_value, device_value = value, ""
         if not nonempty(local_value):
             raise PushError("resource path must not be blank")
 
@@ -172,7 +200,16 @@ def validate_resources(values: Sequence[str]) -> List[Dict[str, Any]]:
         if size > MAX_FILE_BYTES:
             raise PushError("resource exceeds the 100 MiB per-file limit: %s" % path.name)
 
-        name_key = path.name.lower()
+        resolved_path = path.resolve()
+        if any(
+            ord(character) < 32 or ord(character) == 127
+            for character in str(resolved_path)
+        ):
+            raise PushError("resource path must not contain control characters: %s" % path.name)
+        if "\\" in path.name:
+            raise PushError("resource filename must not contain a backslash: %s" % path.name)
+
+        name_key = unicodedata.normalize("NFC", path.name).casefold()
         if name_key in FORBIDDEN_RESOURCE_NAMES:
             raise PushError("send %s through the code endpoint, not as a resource" % path.name)
         if name_key in names:
@@ -188,7 +225,7 @@ def validate_resources(values: Sequence[str]) -> List[Dict[str, Any]]:
             raise PushError("resource batch exceeds the 500 MiB request limit")
         resources.append(
             {
-                "path": path.resolve(),
+                "path": resolved_path,
                 "name": path.name,
                 "size": size,
                 "device_path": normalize_device_path(device_value),
@@ -316,6 +353,16 @@ def push_code(settings: Dict[str, Any], code: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def quote_curl_form_value(value: str) -> str:
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def resource_form_value(resource: Dict[str, Any]) -> str:
+    local_path = quote_curl_form_value(str(resource["path"]))
+    filename = quote_curl_form_value(str(resource["name"]))
+    return "files=@%s;filename=%s" % (local_path, filename)
+
+
 def push_resources(settings: Dict[str, Any], resources: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
     query = {
         "deviceId": settings["device_id"],
@@ -326,9 +373,11 @@ def push_resources(settings: Dict[str, Any], resources: Sequence[Dict[str, Any]]
         urlencode(query),
     )
     arguments: List[str] = ["--url", url]
+    if any('"' in str(item["path"]) or '"' in item["name"] for item in resources):
+        arguments.append("--form-escape")
     include_paths = any(item["device_path"] for item in resources)
     for item in resources:
-        arguments.extend(["--form", "files=@" + str(item["path"])])
+        arguments.extend(["--form", resource_form_value(item)])
         if include_paths:
             arguments.extend(["--form-string", "filePaths=" + item["device_path"]])
 

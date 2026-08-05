@@ -171,7 +171,7 @@ def test_request_rate_counters_are_memory_only_and_thread_safe(tmp_path):
 
 def test_ai_rate_counters_remain_persistent(tmp_path):
     limiter = GatewayRateLimiter(tmp_path / "gateway.sqlite3")
-    now = 1785460000
+    now = int(time.time())
     counters = [("session:test", "ai-day", now - now % 86400, 1, "ai_session_day")]
 
     assert limiter.claim_persistent(counters) == "ok"

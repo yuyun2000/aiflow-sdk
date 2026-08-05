@@ -64,15 +64,26 @@ Content-Type: multipart/form-data
 
 Repeat multipart field `files`. If any resource has an explicit device directory, send one `filePaths` field per file, using an empty value for automatic placement.
 
+The CLI quotes the local path and explicitly sends the original basename so commas, semicolons, spaces, and UTF-8 client filenames are not reinterpreted by cURL. A local path or filename containing a double quote requires cURL 7.81 or newer because the CLI enables `--form-escape` for that case.
+
+Normal UIFlow project resources use directories relative to the device Flash root. UIFlow code and the upload API express the same location differently:
+
+| UIFlow runtime path | Upload `filePaths` value |
+| --- | --- |
+| `res/img/logo.png` or `/flash/res/img/logo.png` | `res/img/` |
+| `file://flash/res/audio/startup.wav` | `res/audio/` |
+
+Pass only the directory to `filePaths`, never the resource filename. The CLI accepts `/flash/...`, `flash/...`, `file://flash/...`, and `file:///flash/...` directory forms and converts them to the Flash-relative API value. It converts `file://sd/...` to `/sd/...` without redirecting it to Flash, but the documented third-party upload contract does not confirm SD delivery; only report SD success after downstream/device verification.
+
 ## Local validation limits
 
 - Code must be non-empty UTF-8.
-- Resource files must be non-empty and have unique basenames.
+- Resource files must be non-empty and have unique basenames after Unicode/case normalization.
 - Resource `main.py` and `main_ota_temp.py` are forbidden.
 - Images (`jpg`, `jpeg`, `png`, `bmp`) must not exceed 2 MiB each.
 - Any single resource must not exceed 100 MiB.
 - One resource request must not exceed 500 MiB total.
-- Device directories must not contain standalone `.` or `..` segments.
+- Device directories must not contain unsupported URI schemes or standalone `.` or `..` segments.
 
 Automatic server directories are `res/img/` for images, `res/audio/` for `mp3`, `amr`, `wamr`, and `wav`, and `res/` for other extensions.
 

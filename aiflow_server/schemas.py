@@ -58,7 +58,11 @@ class Base64Attachment(StrictModel):
     kind: Literal["image", "audio"]
     mime_type: str = Field(min_length=1, max_length=100)
     data_base64: str = Field(min_length=1, max_length=30_000_000)
-    name: str | None = Field(default=None, max_length=255)
+    name: str = Field(
+        min_length=1,
+        max_length=255,
+        description="Client-provided file name used when the attachment is saved",
+    )
 
 
 class ContextResponse(StrictModel):

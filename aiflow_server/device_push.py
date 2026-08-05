@@ -8,7 +8,7 @@ from types import ModuleType
 from typing import Any
 
 from .config import Settings
-from .workspaces import WorkspaceManager
+from .workspaces import WorkspaceError, WorkspaceManager
 
 
 class DeploymentError(RuntimeError):
@@ -68,9 +68,10 @@ class DevicePusher:
         for entry in resources:
             if not isinstance(entry, dict) or not isinstance(entry.get("file"), str):
                 raise DeploymentError("invalid_deploy_manifest", "each resource requires a file string")
-            path = (workspace / entry["file"]).resolve()
-            if workspace.resolve() not in path.parents:
-                raise DeploymentError("invalid_deploy_manifest", "resource path escapes the client workspace")
+            try:
+                path = self.workspaces.safe_path(workspace, entry["file"])
+            except WorkspaceError as exc:
+                raise DeploymentError("invalid_deploy_manifest", str(exc)) from exc
             device_path = entry.get("devicePath", "")
             if not isinstance(device_path, str):
                 raise DeploymentError("invalid_deploy_manifest", "resource devicePath must be a string")
@@ -86,9 +87,10 @@ class DevicePusher:
         include_resources: bool,
     ) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
         workspace = self.workspaces.workspace_for(context["context_id"])
-        code_candidate = (workspace / code_path).resolve()
-        if workspace.resolve() not in code_candidate.parents:
-            raise DeploymentError("invalid_code_path", "code path escapes the client workspace")
+        try:
+            code_candidate = self.workspaces.safe_path(workspace, code_path)
+        except WorkspaceError as exc:
+            raise DeploymentError("invalid_code_path", str(exc)) from exc
         try:
             code = self._module.validate_code(str(code_candidate))
             resources = self._module.validate_resources(

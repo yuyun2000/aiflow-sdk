@@ -32,7 +32,7 @@ flowchart LR
 - Agent 只接受 M5Stack UIFlow2/MicroPython 编程、调试、审查和解释任务；一般问答、非 M5Stack 编程以及纯产品咨询会被拒绝或要求补充目标板卡与编程目标。
 - Coding 是后台任务。SSE 断开不会停止 Agent，客户端可随时轮询状态或按序恢复事件。
 - `direct-run` 跳过 Agent，直接重新推送保存的 `main.py` 和资源清单。
-- Coding 请求可携带 Base64 图片和语音，服务端解码到项目 `inputs/`，只把相对路径交给 Agent，不在 SQLite 保存 Base64 原文。
+- Coding 请求可携带 Base64 图片和语音；客户端必须提供附件文件名，服务端按该名称解码到项目 `inputs/`，只把相对路径交给 Agent，不在 SQLite 保存 Base64 原文。
 
 目录职责：
 
@@ -114,12 +114,14 @@ cp .env.example .env.local
 ANTHROPIC_BASE_URL="https://your-provider.example.com"
 ANTHROPIC_AUTH_TOKEN="your-bearer-token"
 AIFLOW_CLAUDE_MODEL="your-provider-model-id"
+AIFLOW_CLAUDE_SUPPORTS_IMAGE_INPUT="false"
 ```
 
 - `ANTHROPIC_BASE_URL`：第三方提供的 Anthropic 兼容基础 URL，按提供方要求决定是否包含 `/v1`，不要自行追加 `/messages`。
 - `ANTHROPIC_AUTH_TOKEN`：使用 `Authorization: Bearer` 的网关令牌。
 - `ANTHROPIC_API_KEY`：使用 `x-api-key` 的提供方改用此变量；与 `ANTHROPIC_AUTH_TOKEN` 二选一。
 - `AIFLOW_CLAUDE_MODEL`：第三方实际暴露的完整 model ID，服务会作为 Claude Code 的 `--model` 传入。
+- `AIFLOW_CLAUDE_SUPPORTS_IMAGE_INPUT`：模型是否支持图片输入。DeepSeek 等纯文本模型设为 `false`；默认 `true`。
 
 `.env.local` 默认不进入 Git。也可以通过 `AIFLOW_ENV_FILE=/secure/path/provider.env` 指向部署环境生成的配置文件。修改后检查并重启：
 
@@ -142,6 +144,7 @@ AIFLOW_CLAUDE_MODEL="your-provider-model-id"
   "claude": {
     "model": "claude-sonnet-4-5",
     "fallback_model": null,
+    "supports_image_input": true,
     "max_turns": 20,
     "max_budget_usd": null,
     "effort": "high",
@@ -163,12 +166,15 @@ AIFLOW_DATA_DIR
 AIFLOW_SKILLS_DIR
 AIFLOW_CLAUDE_MODEL
 AIFLOW_CLAUDE_FALLBACK_MODEL
+AIFLOW_CLAUDE_SUPPORTS_IMAGE_INPUT
 AIFLOW_MAX_SESSIONS
 AIFLOW_MAX_CONCURRENT_TASKS
 AIFLOW_MAX_QUEUED_TASKS
 ```
 
 Claude Code SDK 会继承服务进程环境。当前服务显式用 `AIFLOW_CLAUDE_MODEL`/`claude.model` 固定模型，并保留 `ANTHROPIC_BASE_URL` 和认证变量给 Claude Code CLI 使用。
+
+`supports_image_input=false` 时，服务不会把图片内容发送给模型，并通过 `PreToolUse` 硬性拒绝 Agent 对图片文件调用 `Read`。Agent 仍会收到文件名、相对路径、MIME 和大小，可直接在 UIFlow2 代码中引用图片路径，并将图片加入 `.aiflow/deploy.json`；它不得解码、OCR、描述或猜测图片内容。文字代码、UIFlow2 文档以及其他非图片文件仍可正常读取。
 
 ### Agent 固定工作流
 
@@ -250,7 +256,7 @@ Claude Code SDK 会继承服务进程环境。当前服务显式用 `AIFLOW_CLAU
 }
 ```
 
-支持纯文字、纯附件或混合消息。附件数量、单文件大小和单条消息总大小在 `messages` 配置；服务端生成自己的安全文件名并保留原始名称为元数据。
+支持纯文字、纯附件或混合消息。`name` 是必填的客户端文件名，服务端校验其为不含目录的单个文件名、扩展名与 MIME 一致，并按该名称保存；同一消息内不允许文件名重复。附件数量、单文件大小和单条消息总大小在 `messages` 配置。
 
 ## Coding 与部署模式
 
@@ -286,6 +292,8 @@ Agent 或客户端可在工作区创建 `.aiflow/deploy.json`：
   ]
 }
 ```
+
+`devicePath` 是设备 Flash 根目录下的相对目录，不是文件名。UIFlow 代码中的 `/flash/res/img/logo.png` 对应清单目录 `res/img/`；`file://flash/res/audio/startup.wav` 对应 `res/audio/`。图片和支持的音频通常可省略 `devicePath`，由上传接口按扩展名自动放到上述目录。
 
 `include_resources=true` 时先推资源，再推 `main.py`。所有路径必须留在当前工作区内。
 资源数组只应包含图片、音频等非代码文件。若清单误把本次部署的代码文件列为资源，服务端会自动排除它，代码仍只通过代码推送接口发送。

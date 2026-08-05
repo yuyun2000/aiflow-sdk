@@ -169,6 +169,118 @@ def test_device_pusher_preserves_http_contract_and_order(tmp_path):
     assert [step["action"] for step in result["steps"]] == ["push-resources", "push-code"]
 
 
+@pytest.mark.parametrize(
+    ("device_path", "expected"),
+    [
+        ("res/img", "res/img/"),
+        ("/flash/res/img/", "res/img/"),
+        ("file://flash/res/audio/", "res/audio/"),
+        ("file:///flash/res/audio/", "res/audio/"),
+        ("/sd/assets/", "/sd/assets/"),
+        ("file://sd/assets/", "/sd/assets/"),
+        ("custom//data", "custom/data/"),
+    ],
+)
+def test_device_pusher_normalizes_uiflow_runtime_paths(tmp_path, device_path, expected):
+    pusher, context, _ = make_pusher(tmp_path, "http://127.0.0.1", with_resources=False)
+    workspace = pusher.workspaces.workspace_for(context["context_id"])
+    assets = workspace / "assets"
+    assets.mkdir()
+    assets.joinpath("payload.bin").write_bytes(b"payload")
+    workspace.joinpath(".aiflow", "deploy.json").write_text(
+        json.dumps(
+            {
+                "resources": [
+                    {"file": "assets/payload.bin", "devicePath": device_path},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    plan = asyncio.run(pusher.plan(context, "main.py", True))
+
+    assert plan["resources"][0]["devicePath"] == expected
+
+
+@pytest.mark.parametrize("device_path", ["https://example.com/assets", "../res", "res/./img"])
+def test_device_pusher_rejects_uri_or_relative_device_paths(tmp_path, device_path):
+    pusher, context, _ = make_pusher(tmp_path, "http://127.0.0.1", with_resources=False)
+    workspace = pusher.workspaces.workspace_for(context["context_id"])
+    workspace.joinpath("payload.bin").write_bytes(b"payload")
+    workspace.joinpath(".aiflow", "deploy.json").write_text(
+        json.dumps(
+            {
+                "resources": [
+                    {"file": "payload.bin", "devicePath": device_path},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(DeploymentError) as caught:
+        asyncio.run(pusher.plan(context, "main.py", True))
+
+    assert caught.value.code == "deployment_validation_failed"
+
+
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "启动;variant,中文.png",
+        '启动::variant="中文".png',
+    ],
+)
+def test_device_pusher_preserves_special_client_filename_in_multipart(tmp_path, filename):
+    with push_server() as (server, base_url):
+        pusher, context, _ = make_pusher(tmp_path, base_url, with_resources=False)
+        workspace = pusher.workspaces.workspace_for(context["context_id"])
+        assets = workspace / "assets"
+        assets.mkdir()
+        assets.joinpath(filename).write_bytes(b"image")
+        workspace.joinpath(".aiflow", "deploy.json").write_text(
+            json.dumps(
+                {
+                    "resources": [
+                        {"file": f"assets/{filename}"},
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        asyncio.run(pusher.deploy(context))
+
+    parts = multipart_parts(server.requests[0])
+    assert [(part["name"], part["filename"], part["body"]) for part in parts] == [
+        ("files", filename, b"image"),
+    ]
+
+
+def test_device_pusher_rejects_internal_workspace_files(tmp_path):
+    pusher, context, _ = make_pusher(tmp_path, "http://127.0.0.1", with_resources=False)
+    workspace = pusher.workspaces.workspace_for(context["context_id"])
+
+    with pytest.raises(DeploymentError) as caught:
+        asyncio.run(pusher.plan(context, ".aiflow/config.json", False))
+    assert caught.value.code == "invalid_code_path"
+
+    workspace.joinpath(".aiflow", "deploy.json").write_text(
+        json.dumps(
+            {
+                "resources": [
+                    {"file": ".aiflow/config.json"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(DeploymentError) as caught:
+        asyncio.run(pusher.plan(context, "main.py", True))
+    assert caught.value.code == "invalid_deploy_manifest"
+
+
 def test_device_pusher_ignores_deployment_code_mislisted_as_resource(tmp_path):
     with push_server() as (server, base_url):
         pusher, context, code_bytes = make_pusher(tmp_path, base_url, with_resources=False)

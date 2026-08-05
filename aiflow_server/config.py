@@ -117,6 +117,7 @@ class Settings:
     skills_dir: Path
     claude_model: str | None
     claude_fallback_model: str | None
+    claude_supports_image_input: bool
     claude_max_turns: int
     claude_max_budget_usd: float | None
     claude_effort: str | None
@@ -167,10 +168,11 @@ class Settings:
 
     def public_dict(self, available_skills: list[str]) -> dict[str, Any]:
         return {
-            "api_version": "3.3",
+            "api_version": "3.4",
             "agent": "claude-code",
             "model": self.claude_model or "claude-code-default",
             "fallback_model": self.claude_fallback_model,
+            "supports_image_input": self.claude_supports_image_input,
             "max_turns": self.claude_max_turns,
             "enabled_skills": list(self.enabled_skills),
             "available_skills": available_skills,
@@ -271,6 +273,11 @@ def load_settings(path: str | Path | None = None) -> Settings:
         skills_dir=_path(os.environ.get("AIFLOW_SKILLS_DIR") or _nested(data, "skills", "directory", "./skills"), base),
         claude_model=str(model) if model else None,
         claude_fallback_model=str(fallback_model) if fallback_model else None,
+        claude_supports_image_input=_boolean(
+            os.environ.get("AIFLOW_CLAUDE_SUPPORTS_IMAGE_INPUT")
+            or _nested(data, "claude", "supports_image_input", True),
+            "claude.supports_image_input",
+        ),
         claude_max_turns=_positive_int(_nested(data, "claude", "max_turns", 20), "claude.max_turns"),
         claude_max_budget_usd=_optional_float(_nested(data, "claude", "max_budget_usd", None), "claude.max_budget_usd"),
         claude_effort=effort,

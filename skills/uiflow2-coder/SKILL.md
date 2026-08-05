@@ -12,7 +12,7 @@ description: UIFlow2 MicroPython coding assistant. Use when writing, debugging, 
 - 先查文档，再写代码；禁止凭经验编造 UIFlow2 API、构造参数、返回值或 import。
 - 先定位目标设备、模块类别和功能，再读取对应 `docs/` 文件。
 - 如果目录下存在 `_overview.md`，先读 `_overview.md` 了解该模块整体规则，再读具体 API 文件。
-- 不确定路径时先查 `file_tree.txt`，再用 `scripts/find_doc.ps1` 或 `scripts/find_doc.sh` 搜索。
+- 不确定路径时先查 `file_tree.txt`，再用 `scripts/find_doc.ps1` 或 `bash scripts/find_doc.sh` 搜索。
 - 生成代码前检查官方示例里的 import、初始化顺序、主循环和返回值用法。
 - 给出代码后附上最小验证方法；不能硬件验证时说明需要在哪块板或哪个 Unit 上验证。
 
@@ -20,7 +20,7 @@ description: UIFlow2 MicroPython coding assistant. Use when writing, debugging, 
 
 本 skill 的官方资料在 `docs/`。下方已内嵌完整文件树；先按树定位文件，再读取对应原文。常用入口：`docs/get-started/_overview.md`、`docs/m5ui/_overview.md`、`docs/widgets/_overview.md`、`docs/hardware/`、`docs/unit/`、`docs/module/`、`docs/base/`、`docs/hat/`、`docs/system/`、`docs/advanced/`。只有包含实质性整体指导的 `index.rst` 会生成 `_overview.md`；纯目录型 overview 已由文件树替代。
 
-不确定时搜索：PowerShell `./scripts/find_doc.ps1 env temperature`；bash `./scripts/find_doc.sh env temperature`。
+不确定时搜索：PowerShell `./scripts/find_doc.ps1 env temperature`；bash `bash ./scripts/find_doc.sh env temperature`。
 
 ## 文档文件树
 

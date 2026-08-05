@@ -13,6 +13,7 @@ from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
     ClaudeSDKClient,
+    HookMatcher,
     RateLimitEvent,
     ResultMessage,
     ServerToolResultBlock,
@@ -44,6 +45,9 @@ M5STACK_MCP_TOOLS = (
 )
 MAX_EVENT_TEXT = 32768
 REASONING_EVENT_INTERVAL_SECONDS = 1.0
+IMAGE_FILE_SUFFIXES = frozenset(
+    {".avif", ".bmp", ".gif", ".ico", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
+)
 SENSITIVE_KEY_PARTS = (
     "authorization",
     "api_key",
@@ -109,7 +113,7 @@ Workflow guidance for every accepted task:
 2. Use m5stack-assistant whenever an official product fact, screen specification, pin, electrical constraint, compatibility detail, firmware behavior, API fact, or troubleshooting conclusion is needed. It may be used before uiflow2-coder when resolving that fact is the logical next step. Do not perform redundant lookups in either Skill.
 3. When m5stack-assistant is needed, follow its rules: query the official M5Stack MCP with knowledge_search or knowledge_answer, never include secrets or customer/device identifiers, and do not guess when official evidence is absent.
 4. If reasonable re-checking confirms missing, contradictory, or incorrect official material, a broken official example, or an MCP tool failure, call knowledge_feedback as required by m5stack-assistant. Include reproducible context and accurate severity. Only say feedback was submitted after receiving a feedback_id. Do not report ordinary user-code bugs as official documentation bugs.
-5. Write the finished runnable program to main.py rather than only printing code. Inspect relevant attachments under inputs/. For generated resources, write .aiflow/deploy.json with a resources array whose items contain file and optional devicePath fields. Include only non-code assets in that array; never list main.py, main_ota_temp.py, or another program selected as the deployment code.
+5. Write the finished runnable program to main.py rather than only printing code. Handle relevant attachments under inputs/ according to the per-request model capability rule. For generated resources, write .aiflow/deploy.json with a resources array whose items contain file and optional devicePath fields. devicePath is a Flash-relative directory such as res/img/ or res/audio/, not a /flash runtime path and not a filename; omit it to use automatic placement. Include only non-code assets in that array; never list main.py, main_ota_temp.py, or another program selected as the deployment code.
 6. Run the smallest useful local syntax/static checks and the validation appropriate for the code and any Skill actually used. If a critical hardware or API fact remains unconfirmed, stop and ask for it; do not guess and do not deploy.
 7. Follow the per-request deployment rule exactly. Deployment is allowed only when that rule explicitly authorizes it, and it must happen after code and resource validation as the final modifying stage.
 
@@ -157,12 +161,47 @@ def _agent_tools(
     return tools, allowed_tools
 
 
+async def _block_image_read(
+    hook_input: dict[str, Any],
+    _tool_use_id: str | None,
+    _context: dict[str, Any],
+) -> dict[str, Any]:
+    tool_input = hook_input.get("tool_input")
+    if not isinstance(tool_input, dict):
+        return {}
+    file_path = str(tool_input.get("file_path") or tool_input.get("path") or "")
+    if Path(file_path).suffix.lower() not in IMAGE_FILE_SUFFIXES:
+        return {}
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": (
+                "Image input is disabled for the configured model. Treat this image as an opaque UIFlow2 "
+                "resource: use its supplied path in code or the deployment manifest without reading, "
+                "decoding, OCR, or describing its contents."
+            ),
+        }
+    }
+
+
+def _model_capability_hooks(supports_image_input: bool) -> dict[str, list[HookMatcher]] | None:
+    if supports_image_input:
+        return None
+    return {
+        "PreToolUse": [
+            HookMatcher(matcher="Read", hooks=[_block_image_read]),
+        ]
+    }
+
+
 def _build_prompt(
     prompt: str,
     device: dict[str, Any],
     deploy_mode: str,
     attachments: list[dict[str, Any]],
     m5stack_mcp_enabled: bool,
+    supports_image_input: bool = True,
 ) -> str:
     public_device = {
         "product": device.get("product"),
@@ -194,6 +233,19 @@ def _build_prompt(
             "The official M5Stack MCP is disabled. If uiflow2-coder cannot establish a critical fact, "
             "ask for clarification and do not guess, claim feedback, or deploy."
         )
+    if supports_image_input:
+        image_instruction = (
+            "Image input is enabled. Inspect an image attachment only when its visual contents are relevant "
+            "to the coding task."
+        )
+    else:
+        image_instruction = (
+            "Image input is disabled for the configured model. Treat every image file as an opaque resource: "
+            "never call Read on it and never use Bash or another tool to decode, OCR, inspect pixels, or send "
+            "its bytes to the model. You may use the supplied filename, relative path, MIME type, and size; "
+            "reference that path from UIFlow2 code and include it in .aiflow/deploy.json when needed. Do not "
+            "claim to know or describe the image contents."
+        )
     attachment_lines = [
         f"- {item['kind']}: {item['path']} ({item['mime_type']}, {item['size']} bytes)"
         for item in attachments
@@ -205,6 +257,7 @@ def _build_prompt(
         f"Message attachments available in this workspace:\n{attachment_text}\n\n"
         f"Device facts supplied by the paired client:\n{json.dumps(public_device, ensure_ascii=False)}\n\n"
         f"Official knowledge service:\n{knowledge_instruction}\n\n"
+        f"Model image capability:\n{image_instruction}\n\n"
         f"Deployment rule:\n{deploy_instruction}\n"
     )
 
@@ -528,6 +581,7 @@ class ClaudeRunner:
             setting_sources=["project"],
             mcp_servers=mcp_servers,
             strict_mcp_config=True,
+            hooks=_model_capability_hooks(self.settings.claude_supports_image_input),
             include_partial_messages=True,
             env=env,
             sandbox={
@@ -549,6 +603,7 @@ class ClaudeRunner:
             deploy_mode,
             context.get("message_attachments", []),
             self.settings.m5stack_mcp_enabled,
+            self.settings.claude_supports_image_input,
         )
         try:
             async with ClaudeSDKClient(options=options) as client:

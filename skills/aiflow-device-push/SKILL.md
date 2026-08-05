@@ -21,10 +21,12 @@ Run the script from the project working directory so relative file paths resolve
 python3 <skill-dir>/scripts/aiflow_push.py plan --code main.py
 python3 <skill-dir>/scripts/aiflow_push.py push-code --code main.py --execute
 python3 <skill-dir>/scripts/aiflow_push.py push-resources --resource logo.png --execute
-python3 <skill-dir>/scripts/aiflow_push.py deploy --code main.py --resource 'logo.png::custom/images/' --execute
+python3 <skill-dir>/scripts/aiflow_push.py deploy --code main.py --resource 'logo.png::res/img/' --execute
 ```
 
 Use `LOCAL_FILE::DEVICE_DIRECTORY` for an explicit device directory. Omit `::DEVICE_DIRECTORY` for server-side automatic placement. Repeat `--resource` for multiple files.
+
+For normal project resources, use a directory relative to the device Flash root, such as `res/img/` or `res/audio/`; never append the resource filename. The CLI also accepts UIFlow runtime forms such as `/flash/res/img/` and `file://flash/res/audio/` and normalizes them to the upload API form. Automatic placement targets `res/...`; an explicit `/sd/...` directory is preserved, but do not claim SD delivery unless the downstream service and target device confirm it.
 
 ## Target Configuration
 

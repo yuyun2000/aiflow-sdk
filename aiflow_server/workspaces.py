@@ -4,6 +4,8 @@ import base64
 import binascii
 import json
 import shutil
+import stat
+import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -24,18 +26,47 @@ class AttachmentError(WorkspaceError):
 
 
 ATTACHMENT_EXTENSIONS = {
-    "image/png": ".png",
-    "image/jpeg": ".jpg",
-    "image/bmp": ".bmp",
-    "image/gif": ".gif",
-    "image/webp": ".webp",
-    "audio/wav": ".wav",
-    "audio/x-wav": ".wav",
-    "audio/mpeg": ".mp3",
-    "audio/mp4": ".m4a",
-    "audio/ogg": ".ogg",
-    "audio/amr": ".amr",
+    "image/png": frozenset({".png"}),
+    "image/jpeg": frozenset({".jpg", ".jpeg"}),
+    "image/bmp": frozenset({".bmp"}),
+    "image/gif": frozenset({".gif"}),
+    "image/webp": frozenset({".webp"}),
+    "audio/wav": frozenset({".wav"}),
+    "audio/x-wav": frozenset({".wav"}),
+    "audio/mpeg": frozenset({".mp3"}),
+    "audio/mp4": frozenset({".m4a", ".mp4"}),
+    "audio/ogg": frozenset({".ogg"}),
+    "audio/amr": frozenset({".amr"}),
 }
+
+
+def validate_attachment_name(name: str, mime_type: str, index: int) -> str:
+    has_control_character = any(
+        ord(character) < 32 or ord(character) == 127 for character in name
+    )
+    if name != name.strip() or has_control_character:
+        raise AttachmentError(
+            "invalid_attachment_name",
+            f"attachment {index} name contains surrounding whitespace or control characters",
+        )
+    if name in {".", ".."} or "/" in name or "\\" in name:
+        raise AttachmentError(
+            "invalid_attachment_name",
+            f"attachment {index} name must be a file name without a directory",
+        )
+    if len(name.encode("utf-8")) > 255:
+        raise AttachmentError(
+            "invalid_attachment_name",
+            f"attachment {index} name exceeds the filesystem byte limit",
+        )
+    extension = Path(name).suffix.lower()
+    if extension not in ATTACHMENT_EXTENSIONS[mime_type]:
+        allowed = ", ".join(sorted(ATTACHMENT_EXTENSIONS[mime_type]))
+        raise AttachmentError(
+            "attachment_extension_mismatch",
+            f"attachment {index} name must use an extension matching {mime_type}: {allowed}",
+        )
+    return name
 
 
 class WorkspaceManager:
@@ -81,6 +112,18 @@ class WorkspaceManager:
                 skill_destination,
                 ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".DS_Store"),
             )
+            scripts_dir = skill_destination / "scripts"
+            if scripts_dir.is_dir():
+                for script in scripts_dir.rglob("*"):
+                    if not script.is_file():
+                        continue
+                    try:
+                        with script.open("rb") as stream:
+                            has_shebang = stream.read(2) == b"#!"
+                    except OSError:
+                        continue
+                    if has_shebang:
+                        script.chmod(script.stat().st_mode | stat.S_IXUSR)
             names.append(name)
 
         allowed_domains = ["mcp.m5stack.com"]
@@ -140,17 +183,27 @@ class WorkspaceManager:
             )
 
         decoded: list[tuple[bytes, dict[str, Any], str]] = []
+        used_names: set[str] = set()
         total_size = 0
         for index, item in enumerate(attachments, start=1):
             kind = str(item["kind"])
             mime_type = str(item["mime_type"]).strip().lower()
             expected_prefix = "image/" if kind == "image" else "audio/"
-            extension = ATTACHMENT_EXTENSIONS.get(mime_type)
-            if not extension or not mime_type.startswith(expected_prefix):
+            if mime_type not in ATTACHMENT_EXTENSIONS or not mime_type.startswith(
+                expected_prefix
+            ):
                 raise AttachmentError(
                     "unsupported_attachment_type",
                     f"unsupported {kind} MIME type: {mime_type}",
                 )
+            name = validate_attachment_name(str(item["name"]), mime_type, index)
+            name_key = unicodedata.normalize("NFC", name).casefold()
+            if name_key in used_names:
+                raise AttachmentError(
+                    "duplicate_attachment_name",
+                    f"attachment {index} name duplicates another attachment in this message",
+                )
+            used_names.add(name_key)
             try:
                 encoded = str(item["data_base64"]).encode("ascii")
                 content = base64.b64decode(encoded, validate=True)
@@ -174,7 +227,7 @@ class WorkspaceManager:
                     "attachments exceed the total message limit",
                     413,
                 )
-            decoded.append((content, item, extension))
+            decoded.append((content, item, name))
 
         if not decoded:
             return []
@@ -183,9 +236,9 @@ class WorkspaceManager:
         directory.mkdir(parents=True, exist_ok=False)
         saved: list[dict[str, Any]] = []
         try:
-            for index, (content, item, extension) in enumerate(decoded, start=1):
+            for content, item, name in decoded:
                 kind = str(item["kind"])
-                path = directory / f"{kind}-{index:02d}{extension}"
+                path = directory / name
                 path.write_bytes(content)
                 saved.append(
                     {
@@ -193,7 +246,7 @@ class WorkspaceManager:
                         "mime_type": str(item["mime_type"]).strip().lower(),
                         "path": path.relative_to(workspace).as_posix(),
                         "size": len(content),
-                        "name": item.get("name"),
+                        "name": name,
                     }
                 )
         except Exception:

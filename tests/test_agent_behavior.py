@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import stat
 from dataclasses import replace
 
 import pytest
@@ -14,7 +16,9 @@ from aiflow_server.agent import (
     AgentError,
     _StreamMessageTracker,
     _agent_tools,
+    _block_image_read,
     _build_prompt,
+    _model_capability_hooks,
     _sanitize_event,
     _should_emit_system_message,
     _stream_event_payload,
@@ -90,6 +94,55 @@ def test_prompt_keeps_device_id_private_and_separates_deployment_modes():
     assert "one --execute deployment" in agent_prompt
 
 
+def test_text_only_model_prompt_keeps_images_as_opaque_uiflow_resources():
+    prompt = _build_prompt(
+        "显示 logo.png",
+        {"device_id": "private-device-id", "client_id": "private-client-id"},
+        "server",
+        [
+            {
+                "kind": "image",
+                "path": "inputs/conversation/task/logo.png",
+                "mime_type": "image/png",
+                "size": 1234,
+            }
+        ],
+        True,
+        False,
+    )
+
+    assert "Image input is disabled" in prompt
+    assert "never call Read" in prompt
+    assert "reference that path from UIFlow2 code" in prompt
+    assert "inputs/conversation/task/logo.png" in prompt
+
+
+def test_text_only_model_hook_denies_only_image_reads():
+    async def exercise():
+        denied = await _block_image_read(
+            {"tool_input": {"file_path": "inputs/task/screen.PNG"}},
+            "tool-use-id",
+            {},
+        )
+        allowed = await _block_image_read(
+            {"tool_input": {"file_path": "skills/uiflow2-coder/docs/m5ui/image.md"}},
+            "tool-use-id",
+            {},
+        )
+        return denied, allowed
+
+    denied, allowed = asyncio.run(exercise())
+
+    decision = denied["hookSpecificOutput"]
+    assert decision["permissionDecision"] == "deny"
+    assert "opaque UIFlow2 resource" in decision["permissionDecisionReason"]
+    assert allowed == {}
+    assert _model_capability_hooks(True) is None
+    disabled_hooks = _model_capability_hooks(False)
+    assert disabled_hooks is not None
+    assert disabled_hooks["PreToolUse"][0].matcher == "Read"
+
+
 def test_workspace_hides_target_and_prunes_push_skill_without_authorization(tmp_path):
     base = load_settings()
     settings = replace(base, data_dir=tmp_path / "data")
@@ -118,6 +171,31 @@ def test_workspace_hides_target_and_prunes_push_skill_without_authorization(tmp_
     exposed_config = json.loads(workspace.joinpath(".aiflow", "config.json").read_text())
     assert exposed_config["defaultDeviceId"] == "private-device-id"
     assert exposed_config["clientId"] == "private-client-id"
+
+
+def test_workspace_sync_restores_shebang_script_execute_permission(tmp_path):
+    skills_dir = tmp_path / "skills"
+    skill = skills_dir / "test-skill"
+    script = skill / "scripts" / "run.sh"
+    script.parent.mkdir(parents=True)
+    skill.joinpath("SKILL.md").write_text("---\nname: test-skill\n---\n", encoding="utf-8")
+    script.write_text("#!/usr/bin/env bash\necho ok\n", encoding="utf-8")
+    script.chmod(0o644)
+
+    base = load_settings()
+    settings = replace(
+        base,
+        data_dir=tmp_path / "data",
+        skills_dir=skills_dir,
+        enabled_skills=("test-skill",),
+    )
+    workspaces = WorkspaceManager(settings)
+    workspace = workspaces.workspace_for("ctx-script-mode")
+    workspace.mkdir(parents=True)
+
+    assert workspaces.sync_skills(workspace) == ["test-skill"]
+    copied = workspace / ".claude" / "skills" / "test-skill" / "scripts" / "run.sh"
+    assert copied.stat().st_mode & stat.S_IXUSR
 
 
 def test_agent_events_redact_reasoning_paths_identifiers_and_credentials(tmp_path):

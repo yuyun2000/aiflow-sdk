@@ -158,6 +158,7 @@ curl -X POST \
 - 反斜杠 `\` 会转换为正斜杠 `/`。
 - 路径不能包含独立的 `.` 或 `..` 相对路径段。
 - 资源文件路径表示目录，服务端最终会将其规范为以 `/` 结尾的目录。
+- 对 UIFlow 项目内的常规 Flash 资源，接入方应传 Flash 根目录下的相对目录，例如运行时 `/flash/res/img/logo.png` 对应 `filePaths=res/img/`，`file://flash/res/audio/startup.wav` 对应 `filePaths=res/audio/`；不要把运行时 URI 或资源文件名直接作为目录发送。当前接口资料未确认 SD 写入语义，不能仅凭 HTTP `200` 声称文件已写入 SD。
 
 ### 3.4 文件限制
 
@@ -240,5 +241,6 @@ HTTP 请求成功表示：
 - 推送源代码时必须使用 `text/plain`，不能使用 JSON 或表单格式。
 - 上传资源文件时必须使用 `multipart/form-data`，并重复使用准确的字段名 `files`。
 - 使用 HTTP 客户端库发送 multipart 请求时，不要手动设置 boundary，应由客户端库自动生成。
+- 客户端可控文件名必须作为 multipart `filename` 原样发送。使用 cURL 时应给本地路径和 `filename` 加双引号；名称包含双引号时需使用 cURL 7.81+ 的 `--form-escape`，避免文件名被改写。
 - 使用 cURL 上传源代码文件时应使用 `--data-binary`，避免换行或内容被表单编码修改。
 - HTTP 成功仅确认服务端已提交推送，设备执行和文件处理结果需要通过设备状态或 ACK 另行确认。
