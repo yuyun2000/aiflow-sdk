@@ -1,6 +1,6 @@
 "use strict";
 
-const { applyAssistantStreamEvent } = window.AIFlowAssistantStream;
+const { applyAssistantStreamEvent, applyReasoningStreamEvent } = window.AIFlowAssistantStream;
 
 const TOKEN_HEADER = "X-AIFlow-Context-Token";
 const CLIENT_KEY_HEADER = "X-AIFlow-Client-Key";
@@ -21,7 +21,6 @@ const RAW_ONLY_AGENT_EVENTS = new Set([
   "agent_connected",
   "agent_status",
   "agent_system",
-  "agent_reasoning",
   "agent_stream_event",
   "agent_sdk_event",
   "agent_user_message",
@@ -35,6 +34,7 @@ const EVENT_TYPES = [
   "agent_system",
   "agent_warning",
   "agent_reasoning",
+  "agent_partial_capture",
   "agent_stream_event",
   "agent_sdk_event",
   "agent_user_message",
@@ -91,6 +91,7 @@ const EVENT_LABELS = {
   agent_system: "系统事件",
   agent_warning: "Agent 警告",
   agent_reasoning: "模型分析",
+  agent_partial_capture: "模型思考",
   agent_stream_event: "模型流事件",
   agent_sdk_event: "SDK 事件",
   agent_user_message: "上下文消息",
@@ -153,6 +154,7 @@ const state = {
   toastTimer: null,
   eventSequences: new Set(),
   assistantRows: new Map(),
+  reasoningRows: new Map(),
   toolRows: new Map(),
   runtimeRows: new Map(),
   rawChunks: [],
@@ -668,7 +670,7 @@ function stageLabel(stage) {
 }
 
 function clearEvents() {
-  for (const entry of state.assistantRows.values()) {
+  for (const entry of [...state.assistantRows.values(), ...state.reasoningRows.values()]) {
     if (entry.flushFrame !== null) cancelAnimationFrame(entry.flushFrame);
   }
   clearTimeout(state.rawFlushTimer);
@@ -689,6 +691,7 @@ function clearEvents() {
   ui["raw-stream"].replaceChildren();
   state.eventSequences.clear();
   state.assistantRows.clear();
+  state.reasoningRows.clear();
   state.toolRows.clear();
   state.runtimeRows.clear();
   state.rawChunks = [];
@@ -951,6 +954,47 @@ function appendAssistantEvent(type, event) {
   }
 }
 
+function ensureReasoningRow(entry, event) {
+  if (!entry.row) {
+    const rowEntry = createActivityRow(ui["agent-log"], "agent_reasoning", event, {
+      label: "模型思考",
+      message: entry.thinking,
+    });
+    Object.assign(entry, rowEntry);
+  }
+  return entry;
+}
+
+function flushReasoningEntry(entry) {
+  entry.flushFrame = null;
+  if (!entry.thinking) return;
+  ensureReasoningRow(entry, entry.lastEvent);
+  updateActivityRow(entry, entry.lastEvent, {
+    type: entry.partial ? "agent_partial_capture" : "agent_reasoning",
+    label: entry.partial ? "模型思考（未完整）" : "模型思考",
+    message: entry.thinking,
+    tone: entry.partial ? "warning" : "",
+  });
+}
+
+function scheduleReasoningFlush(entry) {
+  if (entry.flushFrame !== null || state.historyLoading) return;
+  entry.flushFrame = requestAnimationFrame(() => flushReasoningEntry(entry));
+}
+
+function appendReasoningEvent(type, event) {
+  const updates = applyReasoningStreamEvent(state.reasoningRows, type, event);
+  for (const { kind, entry } of updates) {
+    if (kind === "delta") {
+      scheduleReasoningFlush(entry);
+      continue;
+    }
+    if (entry.flushFrame !== null) cancelAnimationFrame(entry.flushFrame);
+    entry.flushFrame = null;
+    flushReasoningEntry(entry);
+  }
+}
+
 function rawEventLine(type, event) {
   const sequence = Number(event?.sequence);
   const sequenceText = Number.isInteger(sequence) && sequence > 0 ? `#${sequence}` : "#live";
@@ -1022,6 +1066,10 @@ function appendAgentEvent(type, event) {
     appendAssistantEvent(type, event);
     return;
   }
+  if (type === "agent_reasoning" || (type === "agent_partial_capture" && eventData(event).block_type === "thinking")) {
+    appendReasoningEvent(type, event);
+    return;
+  }
   if (["tool_started", "tool_finished", "server_tool_started", "server_tool_finished"].includes(type)) {
     appendToolEvent(type, event);
     return;
@@ -1068,6 +1116,7 @@ async function loadEventHistory(taskId, reset = true) {
       state.historyLoading = false;
       flushRawEvents();
       for (const entry of state.assistantRows.values()) flushAssistantEntry(entry);
+      for (const entry of state.reasoningRows.values()) flushReasoningEntry(entry);
     }
   })();
   state.historyPromise = request;

@@ -310,6 +310,13 @@ print(f"Authentication: {', '.join(auth_sources) if auth_sources else 'not confi
 print("Public entrypoint: anonymous web BFF (aiflow_server.gateway)")
 print("Private core authentication: enabled with an in-memory BFF key")
 print("Browser-held signing secret: none")
+tls = settings.tls_logging
+print(
+    "Conversation TLS logging: "
+    f"{'enabled' if tls.enabled else 'disabled'} "
+    f"(topic={'configured' if tls.topic_id else 'missing'}, "
+    f"credentials={'configured' if tls.access_key and tls.secret_key else 'missing'})"
+)
 print(
     "AI task limits: "
     f"{settings.max_ai_tasks_per_client_minute}/client/minute, "
@@ -352,7 +359,7 @@ run_tests() {
   require_runtime
   "$PYTHON" -m pip install -r "$ROOT_DIR/requirements-dev.txt"
   cd "$ROOT_DIR"
-  exec "$PYTHON" -m pytest -q
+  TLS_LOG_ENABLED=0 exec "$PYTHON" -m pytest -q
 }
 
 case "${1:-help}" in

@@ -5,7 +5,10 @@ python-multipart>=0.0.9
 httpx>=0.27.0
 
 # Claude Code Agent SDK
-claude-agent-sdk
+claude-agent-sdk==0.2.128
 
 # Async support (already used by claude_agent_sdk)
 anyio>=4.0.0
+
+# Volcengine TLS conversation telemetry
+volcengine>=1.0.227,<2

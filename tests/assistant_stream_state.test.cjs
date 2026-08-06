@@ -4,6 +4,7 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 const {
   applyAssistantStreamEvent,
+  applyReasoningStreamEvent,
   blockIdentity,
 } = require("../web/assistant-stream.js");
 
@@ -123,4 +124,71 @@ test("different text blocks are not merged by the mismatch fallback", () => {
   assert.equal(entries.size, 2);
   assert.equal(entries.get("msg-provider-2:1").text, "第一块");
   assert.equal(entries.get("msg-provider-2:2").text, "第二块");
+});
+
+test("thinking deltas and final block render once with final calibration", () => {
+  const entries = new Map();
+  applyReasoningStreamEvent(entries, "agent_reasoning", event(1, {
+    response_id: "msg-thinking-1",
+    block_index: 0,
+    finalized: false,
+    thinking: "先检查",
+  }));
+  applyReasoningStreamEvent(entries, "agent_reasoning", event(2, {
+    response_id: "msg-thinking-1",
+    block_index: 0,
+    finalized: false,
+    thinking: "现有代码",
+  }));
+
+  assert.equal(entries.size, 1);
+  assert.equal(entries.get("msg-thinking-1:0").thinking, "先检查现有代码");
+
+  applyReasoningStreamEvent(entries, "agent_reasoning", event(3, {
+    response_id: "msg-thinking-1",
+    block_index: 0,
+    finalized: true,
+    thinking: "先检查现有代码。",
+  }));
+  const late = applyReasoningStreamEvent(entries, "agent_reasoning", event(4, {
+    response_id: "msg-thinking-1",
+    block_index: 0,
+    finalized: false,
+    thinking: "不应重复",
+  }));
+
+  assert.deepEqual(late, []);
+  assert.equal(entries.size, 1);
+  assert.equal(entries.get("msg-thinking-1:0").thinking, "先检查现有代码。");
+  assert.equal(entries.get("msg-thinking-1:0").finalized, true);
+});
+
+test("partial thinking capture calibrates accumulated deltas without duplication", () => {
+  const entries = new Map();
+  applyReasoningStreamEvent(entries, "agent_reasoning", event(1, {
+    response_id: "msg-thinking-partial",
+    block_index: 2,
+    finalized: false,
+    thinking: "中断前",
+  }));
+  applyReasoningStreamEvent(entries, "agent_partial_capture", event(2, {
+    response_id: "msg-thinking-partial",
+    block_index: 2,
+    block_type: "thinking",
+    finalized: false,
+    partial: true,
+    thinking: "中断前完整片段",
+  }));
+  const late = applyReasoningStreamEvent(entries, "agent_reasoning", event(3, {
+    response_id: "msg-thinking-partial",
+    block_index: 2,
+    finalized: false,
+    thinking: "不应重复",
+  }));
+
+  assert.deepEqual(late, []);
+  assert.equal(entries.size, 1);
+  assert.equal(entries.get("msg-thinking-partial:2").thinking, "中断前完整片段");
+  assert.equal(entries.get("msg-thinking-partial:2").partial, true);
+  assert.equal(entries.get("msg-thinking-partial:2").finalized, false);
 });

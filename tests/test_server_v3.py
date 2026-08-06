@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import time
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -36,6 +38,25 @@ class FakeRunner:
         self.max_active = max(self.max_active, self.active)
         await emit("tool_started", {"stage": "writing_files", "progress": 60, "message": "Writing main.py"})
         await emit("agent_status", {"stage": "agent_starting", "progress": 20, "message": "late SDK status"})
+        if prompt == "thinking":
+            await emit(
+                "agent_reasoning",
+                {
+                    "response_id": "msg-thinking-api",
+                    "block_index": 0,
+                    "finalized": False,
+                    "thinking": "first ",
+                },
+            )
+            await emit(
+                "agent_reasoning",
+                {
+                    "response_id": "msg-thinking-api",
+                    "block_index": 0,
+                    "finalized": True,
+                    "thinking": "first second",
+                },
+            )
         workspace = Path(context["workspace"])
         workspace.joinpath("main.py").write_text("print('isolated')\n", encoding="utf-8")
         try:
@@ -178,7 +199,9 @@ def test_built_in_web_client_is_served(service):
     assert "appendEvent(" not in script.text
     assert "requestAnimationFrame(() => flushAssistantEntry(entry))" in script.text
     assert "applyAssistantStreamEvent(state.assistantRows, type, event)" in script.text
+    assert "applyReasoningStreamEvent(state.reasoningRows, type, event)" in script.text
     assert "function applyAssistantStreamEvent(entries, type, event)" in stream_state.text
+    assert "function applyReasoningStreamEvent(entries, type, event)" in stream_state.text
     assert "function blockIdentity(data, event)" in stream_state.text
     assert "finalTexts" not in script.text + stream_state.text
     assert "setTimeout(flushRawEvents, 50)" in script.text
@@ -269,6 +292,95 @@ def test_task_event_subscribers_wake_immediately_and_cleanup(service):
     app.state.tasks.unsubscribe_events("other-task", unrelated)
     assert task_id not in app.state.tasks._event_subscribers
     assert "other-task" not in app.state.tasks._event_subscribers
+
+
+def test_public_history_and_sse_include_thinking_content(service):
+    client, _, _, _ = service
+    _, headers = create_context(client, "thinking-public")
+    created = client.post(
+        "/api/v3/tasks/coding",
+        headers=headers,
+        json={"prompt": "thinking", "deploy_mode": "none"},
+    ).json()
+    wait_terminal(client, created["task_id"], headers)
+
+    history = client.get(
+        f"/api/v3/tasks/{created['task_id']}/events/history",
+        headers=headers,
+    ).json()["events"]
+    reasoning = [event["data"] for event in history if event["type"] == "agent_reasoning"]
+    assert reasoning == [
+        {
+            "response_id": "msg-thinking-api",
+            "block_index": 0,
+            "finalized": False,
+            "thinking": "first ",
+        },
+        {
+            "response_id": "msg-thinking-api",
+            "block_index": 0,
+            "finalized": True,
+            "thinking": "first second",
+        },
+    ]
+
+    stream = client.get(
+        created["events_url"],
+        params={"stream_token": created["stream_token"]},
+    )
+    assert stream.status_code == 200
+    assert stream.text.count("event: agent_reasoning") == 2
+    assert '"thinking":"first "' in stream.text
+    assert '"thinking":"first second"' in stream.text
+
+
+def test_conversation_messages_keep_thinking_but_redact_sensitive_fields(
+    service,
+    monkeypatch,
+):
+    client, app, _, _ = service
+    context, headers = create_context(client, "session-thinking")
+    workspace = app.state.workspaces.workspace_for(context["context_id"])
+    session_id = "00000000-0000-4000-8000-000000000099"
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "provider-secret-value")
+    monkeypatch.setattr(
+        "aiflow_server.app.list_sessions",
+        lambda directory: [SimpleNamespace(session_id=session_id)],
+    )
+    monkeypatch.setattr(
+        "aiflow_server.app.get_session_messages",
+        lambda **kwargs: [
+            SimpleNamespace(
+                type="assistant",
+                uuid="assistant-session-message",
+                message={
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "thinking",
+                            "thinking": (
+                                f"inspect {workspace} TOKEN=provider-secret-value "
+                                "for device-session-thinking"
+                            ),
+                            "signature": "provider-signature",
+                        }
+                    ],
+                },
+            )
+        ],
+    )
+
+    response = client.get(
+        f"/api/v3/conversations/{session_id}/messages",
+        headers=headers,
+    )
+    assert response.status_code == 200, response.text
+    thinking = response.json()["messages"][0]["message"]["content"][0]
+    assert thinking == {
+        "type": "thinking",
+        "thinking": "inspect <workspace> TOKEN=<redacted> for <redacted>",
+        "signature": "<redacted>",
+    }
 
 
 def test_sse_endpoints_wait_for_event_signals_instead_of_polling():
@@ -430,6 +542,13 @@ def test_device_id_reconnect_and_session_capacity(tmp_path):
             "available": 0,
             "accepting_new": False,
         }
+        assert status_payload["conversation_logging"] == {
+            "enabled": False,
+            "pending_records": 0,
+            "oldest_created_at": None,
+            "max_attempts": 0,
+            "worker_running": False,
+        }
 
 
 def test_context_creation_requires_client_id_and_accepts_camel_case_aliases(service):
@@ -568,6 +687,10 @@ def test_base64_image_and_audio_use_client_names_without_persisting_payload(serv
     assert workspace.joinpath(saved[1]["path"]).read_bytes() == audio_bytes
     stored_request = app.state.storage.get_task(task_id)["request"]
     assert all("data_base64" not in item for item in stored_request["attachments"])
+    assert [item["sha256"] for item in stored_request["attachments"]] == [
+        hashlib.sha256(image_bytes).hexdigest(),
+        hashlib.sha256(audio_bytes).hexdigest(),
+    ]
 
     invalid = client.post(
         "/api/v3/tasks/coding",

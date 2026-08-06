@@ -63,6 +63,22 @@
     "agent_stall_seconds": 120,
     "event_retention": 10000
   },
+  "telemetry": {
+    "tls_enabled": false,
+    "schema_version": 2,
+    "tls_endpoint": "tls-cn-beijing.volces.com",
+    "tls_region": "cn-beijing",
+    "tls_topic_id": "d66e9a86-bbd5-419b-91db-d5aef9a4a42a",
+    "source": "aiflow-conversation",
+    "filename": "conversation-trace.log",
+    "batch_size": 20,
+    "batch_wait_seconds": 0.05,
+    "upload_timeout_seconds": 5,
+    "shutdown_timeout_seconds": 2,
+    "retry_base_seconds": 1,
+    "retry_max_seconds": 300,
+    "max_payload_bytes": 131072
+  },
   "uploads": {
     "max_bytes": 10485760
   },

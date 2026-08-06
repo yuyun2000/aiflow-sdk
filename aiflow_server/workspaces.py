@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
 import json
 import shutil
 import stat
@@ -246,6 +247,7 @@ class WorkspaceManager:
                         "mime_type": str(item["mime_type"]).strip().lower(),
                         "path": path.relative_to(workspace).as_posix(),
                         "size": len(content),
+                        "sha256": hashlib.sha256(content).hexdigest(),
                         "name": name,
                     }
                 )

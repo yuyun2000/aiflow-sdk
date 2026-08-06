@@ -29,7 +29,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import __version__
-from .agent import ClaudeRunner
+from .agent import ClaudeRunner, _event_secrets, _sanitize_event
 from .config import Settings, load_settings
 from .device_push import DeploymentError, DevicePusher
 from .schemas import (
@@ -59,6 +59,7 @@ from .security import (
 )
 from .storage import SessionCapacityFull, TERMINAL_STATUSES, Storage, new_token, utc_now
 from .tasks import TaskConflict, TaskManager, TaskNotFound, TaskQueueFull
+from .telemetry import TlsTelemetry
 from .workspaces import AttachmentError, WorkspaceError, WorkspaceManager
 
 
@@ -118,17 +119,34 @@ def create_app(
     pusher: DevicePusher | None = None,
 ) -> FastAPI:
     configured = settings or load_settings()
-    storage = Storage(configured.database_path, configured.event_retention)
+    telemetry = TlsTelemetry(configured.tls_logging, configured.database_path)
+    storage = Storage(
+        configured.database_path,
+        configured.event_retention,
+        tls_logging=configured.tls_logging,
+        telemetry_notify=telemetry.notify,
+    )
     workspaces = WorkspaceManager(configured)
     effective_runner = runner or ClaudeRunner(configured, workspaces)
     effective_pusher = pusher or DevicePusher(configured, workspaces)
-    tasks = TaskManager(configured, storage, workspaces, effective_runner, effective_pusher)
+    tasks = TaskManager(
+        configured,
+        storage,
+        workspaces,
+        effective_runner,
+        effective_pusher,
+        telemetry,
+    )
     client_auth = ClientAuthenticator(configured, storage)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
-        yield
-        await tasks.shutdown()
+        telemetry.start()
+        try:
+            yield
+        finally:
+            await tasks.shutdown()
+            telemetry.shutdown()
 
     app = FastAPI(
         title="AIFlow Web Agent Service",
@@ -142,6 +160,7 @@ def create_app(
     app.state.tasks = tasks
     app.state.pusher = effective_pusher
     app.state.client_auth = client_auth
+    app.state.telemetry = telemetry
 
     @app.middleware("http")
     async def authenticate_official_client(request: Request, call_next):
@@ -596,7 +615,19 @@ def create_app(
             "device_id": context["device_id"],
             "session_id": session_id,
             "messages": [
-                {"type": item.type, "uuid": item.uuid, "message": _redact_paths(item.message, roots)}
+                {
+                    "type": item.type,
+                    "uuid": item.uuid,
+                    "message": _sanitize_event(
+                        _redact_paths(item.message, roots),
+                        workspace,
+                        _event_secrets(context["device"]),
+                        max_text_chars=None,
+                        max_items=None,
+                        max_depth=32,
+                        redact_reasoning=False,
+                    ),
+                }
                 for item in messages
             ],
         }

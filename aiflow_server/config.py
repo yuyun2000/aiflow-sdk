@@ -45,6 +45,16 @@ def _optional_float(value: Any, name: str) -> float | None:
     return parsed
 
 
+def _non_negative_float(value: Any, name: str) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(f"{name} must be a number") from exc
+    if parsed < 0:
+        raise ConfigError(f"{name} must be zero or greater")
+    return parsed
+
+
 def _positive_int(value: Any, name: str) -> int:
     try:
         parsed = int(value)
@@ -107,6 +117,27 @@ def _normalize_base_url(value: str) -> str:
 
 
 @dataclass(frozen=True)
+class TlsLoggingSettings:
+    enabled: bool
+    schema_version: int
+    endpoint: str
+    region: str
+    access_key: str
+    secret_key: str
+    topic_id: str
+    source: str
+    filename: str
+    pseudonym_key: str
+    batch_size: int
+    batch_wait_seconds: float
+    upload_timeout_seconds: int
+    shutdown_timeout_seconds: float
+    retry_base_seconds: float
+    retry_max_seconds: float
+    max_payload_bytes: int
+
+
+@dataclass(frozen=True)
 class Settings:
     config_path: Path
     root_dir: Path
@@ -157,6 +188,7 @@ class Settings:
     web_ai_tasks_per_session_minute: int
     web_ai_tasks_per_session_day: int
     web_ai_tasks_per_ip_day: int
+    tls_logging: TlsLoggingSettings
 
     @property
     def database_path(self) -> Path:
@@ -262,6 +294,60 @@ def load_settings(path: str | Path | None = None) -> Settings:
     client_auth_keys = _load_client_keys(client_auth_keys_file) if client_auth_keys_file else ()
     if client_auth_enabled and not client_auth_keys:
         raise ConfigError("client_auth is enabled but no client keys file is configured")
+
+    tls_enabled = _boolean(
+        os.environ.get("TLS_LOG_ENABLED")
+        or _nested(data, "telemetry", "tls_enabled", False),
+        "telemetry.tls_enabled",
+    )
+    tls_endpoint = str(
+        os.environ.get("TLS_ENDPOINT")
+        or _nested(data, "telemetry", "tls_endpoint", "tls-cn-beijing.volces.com")
+    ).strip()
+    tls_region = str(
+        os.environ.get("TLS_REGION")
+        or _nested(data, "telemetry", "tls_region", "cn-beijing")
+    ).strip()
+    tls_topic_id = str(
+        os.environ.get("LOG_TLS_TOPIC_ID")
+        or _nested(data, "telemetry", "tls_topic_id", "")
+    ).strip()
+    tls_access_key = os.environ.get("TLS_ACCESS_KEY", "").strip()
+    tls_secret_key = os.environ.get("TLS_SECRET_KEY", "").strip()
+    tls_pseudonym_key = os.environ.get("TLS_PSEUDONYM_KEY", "").strip()
+    if tls_enabled:
+        missing = [
+            name
+            for name, value in (
+                ("TLS_ENDPOINT", tls_endpoint),
+                ("TLS_REGION", tls_region),
+                ("TLS_ACCESS_KEY", tls_access_key),
+                ("TLS_SECRET_KEY", tls_secret_key),
+                ("LOG_TLS_TOPIC_ID", tls_topic_id),
+                ("TLS_PSEUDONYM_KEY", tls_pseudonym_key),
+            )
+            if not value
+        ]
+        if missing:
+            raise ConfigError(
+                "TLS logging is enabled but required settings are missing: "
+                + ", ".join(missing)
+            )
+        if len(tls_pseudonym_key.encode("utf-8")) < 32:
+            raise ConfigError("TLS_PSEUDONYM_KEY must be at least 32 bytes")
+
+    retry_base_seconds = _non_negative_float(
+        os.environ.get("TLS_LOG_RETRY_BASE_SECONDS")
+        or _nested(data, "telemetry", "retry_base_seconds", 1),
+        "telemetry.retry_base_seconds",
+    )
+    retry_max_seconds = _non_negative_float(
+        os.environ.get("TLS_LOG_RETRY_MAX_SECONDS")
+        or _nested(data, "telemetry", "retry_max_seconds", 300),
+        "telemetry.retry_max_seconds",
+    )
+    if retry_max_seconds < retry_base_seconds:
+        raise ConfigError("telemetry.retry_max_seconds must be at least retry_base_seconds")
 
     return Settings(
         config_path=config_path,
@@ -371,5 +457,48 @@ def load_settings(path: str | Path | None = None) -> Settings:
         web_ai_tasks_per_ip_day=_positive_int(
             _nested(data, "web_gateway", "max_ai_tasks_per_ip_day", 100),
             "web_gateway.max_ai_tasks_per_ip_day",
+        ),
+        tls_logging=TlsLoggingSettings(
+            enabled=tls_enabled,
+            schema_version=_positive_int(
+                os.environ.get("TLS_LOG_SCHEMA_VERSION")
+                or _nested(data, "telemetry", "schema_version", 2),
+                "telemetry.schema_version",
+            ),
+            endpoint=tls_endpoint,
+            region=tls_region,
+            access_key=tls_access_key,
+            secret_key=tls_secret_key,
+            topic_id=tls_topic_id,
+            source=str(_nested(data, "telemetry", "source", "aiflow-conversation")),
+            filename=str(_nested(data, "telemetry", "filename", "conversation-trace.log")),
+            pseudonym_key=tls_pseudonym_key,
+            batch_size=_positive_int(
+                os.environ.get("TLS_LOG_BATCH_SIZE")
+                or _nested(data, "telemetry", "batch_size", 20),
+                "telemetry.batch_size",
+            ),
+            batch_wait_seconds=_non_negative_float(
+                os.environ.get("TLS_LOG_BATCH_WAIT_SECONDS")
+                or _nested(data, "telemetry", "batch_wait_seconds", 0.05),
+                "telemetry.batch_wait_seconds",
+            ),
+            upload_timeout_seconds=_positive_int(
+                os.environ.get("TLS_UPLOAD_TIMEOUT_SECONDS")
+                or _nested(data, "telemetry", "upload_timeout_seconds", 5),
+                "telemetry.upload_timeout_seconds",
+            ),
+            shutdown_timeout_seconds=_non_negative_float(
+                os.environ.get("TLS_LOG_SHUTDOWN_TIMEOUT_SECONDS")
+                or _nested(data, "telemetry", "shutdown_timeout_seconds", 2),
+                "telemetry.shutdown_timeout_seconds",
+            ),
+            retry_base_seconds=retry_base_seconds,
+            retry_max_seconds=retry_max_seconds,
+            max_payload_bytes=_positive_int(
+                os.environ.get("TLS_LOG_MAX_PAYLOAD_BYTES")
+                or _nested(data, "telemetry", "max_payload_bytes", 131072),
+                "telemetry.max_payload_bytes",
+            ),
         ),
     )

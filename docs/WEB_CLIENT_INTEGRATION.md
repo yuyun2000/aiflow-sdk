@@ -150,7 +150,8 @@ function watchTask(task, handlers) {
   const source = new EventSource(url);
   const types = [
     "task_queued", "task_started", "agent_connected", "agent_system",
-    "agent_status", "agent_warning", "agent_reasoning", "agent_stream_event",
+    "agent_status", "agent_warning", "agent_reasoning", "agent_partial_capture",
+    "agent_stream_event",
     "agent_sdk_event", "agent_user_message", "agent_user_content",
     "assistant_message_started", "assistant_text_delta", "assistant_message",
     "assistant_message_finished", "tool_started", "tool_finished",
@@ -177,9 +178,9 @@ function watchTask(task, handlers) {
 
 SSE token 只读一个任务。SSE 断开不影响后台执行，改用状态轮询和历史补偿：
 
-SSE 在事件写入后立即唤醒连接，不按固定时间轮询。`assistant_text_delta` 带 `finalized=false`，按 `response_id + block_index` 追加到同一文本块；`assistant_message` 带 `finalized=true`，用 SDK 最终完整文本覆盖校准同一文本块，不能再追加一份。收到最终块后忽略该键的晚到 delta。`assistant_message_started/finished` 是响应级事件，`finished` 应结束相同 `response_id` 下的全部文本块。不要用 SDK 外层 `message_uuid` 关联增量与最终消息，因为它可能不同。
+SSE 在事件写入后立即唤醒连接，不按固定时间轮询。`assistant_text_delta` 和 `agent_reasoning` 增量都带 `finalized=false`，正文分别是 `text` 和 `thinking`；按内容类型分别以 `response_id + block_index` 追加到同一块。最终 `assistant_message` 和 `agent_reasoning` 带 `finalized=true`，用 SDK 最终完整内容覆盖校准，不能再追加一份。收到最终块后忽略该键的晚到 delta。`agent_partial_capture` 的 thinking 是流中断前累计内容，应覆盖校准并标记未完整。`assistant_message_started/finished` 是响应级事件，`finished` 应结束相同 `response_id` 下的全部文本块。不要用 SDK 外层 `message_uuid` 关联增量与最终消息，因为它可能不同。
 
-`tool_started/tool_finished` 用 `tool_use_id` 关联，但应分别展示真实完整输入与真实结果，不要改写成“正在组织参数”等推测文案。逐字符 `input_json_delta`、签名碎片和高频 `thinking_tokens` 没有独立展示价值，服务端不会单独持久化或下发；其他 `agent_stream_event` 会保留并脱敏。`agent_reasoning` 只低频表示模型仍在分析，不含隐藏思维原文；其他事件也会脱敏凭据、设备标识和服务端绝对路径。内置客户端保留事件总计数，但原始事件 DOM 只显示最近 `2000` 条。
+`tool_started/tool_finished` 用 `tool_use_id` 关联，但应分别展示真实完整输入与真实结果，不要改写成“正在组织参数”等推测文案。逐字符 `input_json_delta`、签名碎片和高频 `thinking_tokens` 没有独立展示价值，服务端不会单独持久化或下发；其他 `agent_stream_event` 会保留并脱敏。SDK 实际提供的 `thinking_delta` 会逐片通过 `agent_reasoning` 公开，内置客户端将其独立显示为“模型思考”。thinking 和其他事件仍会脱敏凭据、设备标识、签名和服务端绝对路径。内置客户端保留事件总计数，但原始事件 DOM 只显示最近 `2000` 条。
 
 ```js
 async function getTask(deviceId, taskId) {
