@@ -30,9 +30,11 @@ flowchart LR
 - Claude Code 的模型、预算、工具、sandbox、MCP 和 Skill 在 [server_config.json](server_config.json) 配置。
 - `skills/` 下启用的 Skill 会复制到当前上下文的 `.claude/skills/`，仅加载项目设置，不加载用户级 Claude 设置。
 - Agent 只接受 M5Stack UIFlow2/MicroPython 编程、调试、审查和解释任务；一般问答、非 M5Stack 编程以及纯产品咨询会被拒绝或要求补充目标板卡与编程目标。
+- Agent 的澄清、工具前后进度和最终回复均跟随用户本人使用的语种；UIFlow/API 名称、Skill、MCP、文档、代码、日志和工具结果不会改变回复语言，技术标识保持自然原文。
 - Coding 是后台任务。SSE 断开不会停止 Agent，客户端可随时轮询状态或按序恢复事件。
 - `direct-run` 跳过 Agent，直接重新推送保存的 `main.py` 和资源清单。
 - Coding 请求可携带 Base64 图片和语音；客户端必须提供附件文件名，服务端按该名称解码到项目 `inputs/`，只把相对路径交给 Agent，不在 SQLite 保存 Base64 原文。
+- 可选的火山 TLS 对话审计将每个 `task_id` 作为唯一轮次，以 `conversation_id + turn_index + event_sequence` 保存用户输入、SDK 最终完整文本与 SDK 暴露的 thinking、工具调用/结果和终态；公开 SSE/history 同时发送脱敏后的 thinking 增量与最终块，上传前先写 SQLite outbox，失败或重启后续传。
 
 目录职责：
 
@@ -132,6 +134,19 @@ AIFLOW_CLAUDE_SUPPORTS_IMAGE_INPUT="false"
 ```
 
 `config` 只显示有效 model ID、URL 和认证变量名，不输出密钥。
+
+### 火山 TLS 对话日志
+
+`server_config.json -> telemetry` 保存非敏感默认参数和专用 Topic；访问密钥、Secret 与匿名化 HMAC 密钥只放在 `.env.local`：
+
+```dotenv
+TLS_LOG_ENABLED="1"
+TLS_ACCESS_KEY="your-volcengine-access-key"
+TLS_SECRET_KEY="your-volcengine-secret-key"
+TLS_PSEUDONYM_KEY="your-independent-random-secret"
+```
+
+服务实时发送模型文本和 thinking delta，最终块到达后由客户端按 `response_id + block_index` 覆盖校准；TLS 只把 SDK 最终完整内容块写入 outbox，流中断时只保存一次 partial 兜底，不重复上传每个 delta。后台线程批量上传，不在每一轮复制完整历史，也不阻塞 asyncio 模型流。当前按固定的 `claude-agent-sdk==0.2.128` 审计全部消息/内容块；thinking 仅指模型提供方实际交给 SDK 的内容。逻辑重复会在上传前消除，网络超时造成的至少一次重传由消费端按 `record_id` 去重。`GET /api/v3/system/status` 的 `conversation_logging` 可检查上传线程和积压数量。字段、覆盖矩阵、聚合重建、隐私边界与故障恢复详见 [CONVERSATION_LOGGING.md](docs/CONVERSATION_LOGGING.md)。
 
 模型 ID 也可写入 [server_config.json](server_config.json) 的 `claude.model`，或临时使用 `AIFLOW_CLAUDE_MODEL` 覆盖；API Key 不要写入 JSON、网页请求或设备资料。
 
@@ -325,6 +340,7 @@ Agent 或客户端可在工作区创建 `.aiflow/deploy.json`：
 
 - [API_V3.md](docs/API_V3.md)：完整接口协议、容量状态和多模态消息格式。
 - [CLIENT_SECURITY.md](docs/CLIENT_SECURITY.md)：匿名 Web BFF、内部签名、防重放、费用限额和 Agent 事件脱敏。
+- [CONVERSATION_LOGGING.md](docs/CONVERSATION_LOGGING.md)：TLS 对话事件 schema、可靠上传、隐私边界和多轮重建。
 - [WEB_CLIENT_INTEGRATION.md](docs/WEB_CLIENT_INTEGRATION.md)：网页端对接流程与 JavaScript 示例。
 - [THIRD_PARTY_DEVICE_PUSH_API.md](docs/THIRD_PARTY_DEVICE_PUSH_API.md)：底层设备推送接口语义。
 - [V2_MIGRATION.md](docs/legacy/V2_MIGRATION.md)：V2 到 V3 迁移说明。

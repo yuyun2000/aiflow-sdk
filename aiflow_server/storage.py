@@ -8,7 +8,14 @@ import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
+
+from .config import TlsLoggingSettings
+from .telemetry import (
+    enqueue_trace_event,
+    initialize_tls_outbox,
+    should_enqueue_trace_event,
+)
 
 
 TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
@@ -31,9 +38,18 @@ def new_token(prefix: str) -> str:
 
 
 class Storage:
-    def __init__(self, database_path: Path, event_retention: int = 10000):
+    def __init__(
+        self,
+        database_path: Path,
+        event_retention: int = 10000,
+        *,
+        tls_logging: TlsLoggingSettings | None = None,
+        telemetry_notify: Callable[[], None] | None = None,
+    ):
         self.database_path = database_path
         self.event_retention = event_retention
+        self.tls_logging = tls_logging
+        self.telemetry_notify = telemetry_notify
         database_path.parent.mkdir(parents=True, exist_ok=True)
         self._initialize()
 
@@ -69,6 +85,8 @@ class Storage:
                 CREATE TABLE IF NOT EXISTS tasks (
                     task_id TEXT PRIMARY KEY,
                     context_id TEXT NOT NULL,
+                    conversation_id TEXT NOT NULL,
+                    turn_index INTEGER NOT NULL,
                     stream_token_hash TEXT NOT NULL UNIQUE,
                     kind TEXT NOT NULL,
                     status TEXT NOT NULL,
@@ -118,7 +136,21 @@ class Storage:
                 """
             )
             self._migrate_context_columns(db)
+            self._migrate_task_trace_columns(db)
+            initialize_tls_outbox(db)
             now = utc_now()
+            interrupted = db.execute(
+                """
+                SELECT task_id, context_id, conversation_id, turn_index, kind
+                FROM tasks
+                WHERE status NOT IN ('completed', 'failed', 'cancelled')
+                """
+            ).fetchall()
+            restart_error = {
+                "code": "server_restarted",
+                "message": "service restarted while task was active",
+                "retryable": False,
+            }
             db.execute(
                 """
                 UPDATE tasks
@@ -126,8 +158,46 @@ class Storage:
                     error_json=?, updated_at=?, finished_at=?
                 WHERE status NOT IN ('completed', 'failed', 'cancelled')
                 """,
-                (json.dumps({"code": "server_restarted", "message": "service restarted while task was active"}), now, now),
+                (json.dumps(restart_error), now, now),
             )
+            for task in interrupted:
+                row = db.execute(
+                    "SELECT COALESCE(MAX(sequence), 0) AS value FROM task_events WHERE task_id=?",
+                    (task["task_id"],),
+                ).fetchone()
+                sequence = int(row["value"]) + 1
+                event_data = {
+                    "status": "failed",
+                    "stage": "server_restarted",
+                    "progress": 100,
+                    "error": restart_error,
+                }
+                db.execute(
+                    """
+                    INSERT INTO task_events(task_id, sequence, event_type, data_json, created_at)
+                    VALUES (?, ?, 'task_failed', ?, ?)
+                    """,
+                    (
+                        task["task_id"],
+                        sequence,
+                        json.dumps(event_data, ensure_ascii=False),
+                        now,
+                    ),
+                )
+                if self.tls_logging and self.tls_logging.enabled:
+                    enqueue_trace_event(
+                        db,
+                        self.tls_logging,
+                        context_id=task["context_id"],
+                        conversation_id=task["conversation_id"],
+                        turn_id=task["task_id"],
+                        turn_index=int(task["turn_index"]),
+                        turn_kind=task["kind"],
+                        event_sequence=sequence,
+                        event_type="task_failed",
+                        event_data=event_data,
+                        created_at=now,
+                    )
 
     @staticmethod
     def _counter_value(
@@ -242,6 +312,42 @@ class Storage:
                 (candidate, row["context_id"]),
             )
         db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_contexts_device_id ON contexts(device_id)")
+
+    @staticmethod
+    def _migrate_task_trace_columns(db: sqlite3.Connection) -> None:
+        columns = {row["name"] for row in db.execute("PRAGMA table_info(tasks)").fetchall()}
+        if "conversation_id" not in columns:
+            db.execute("ALTER TABLE tasks ADD COLUMN conversation_id TEXT")
+        if "turn_index" not in columns:
+            db.execute("ALTER TABLE tasks ADD COLUMN turn_index INTEGER NOT NULL DEFAULT 0")
+
+        db.execute(
+            """
+            UPDATE tasks
+            SET conversation_id=(
+                SELECT contexts.conversation_id
+                FROM contexts
+                WHERE contexts.context_id=tasks.context_id
+            )
+            WHERE conversation_id IS NULL OR conversation_id=''
+            """
+        )
+        rows = db.execute(
+            """
+            SELECT task_id, context_id, conversation_id, turn_index
+            FROM tasks
+            ORDER BY context_id, conversation_id, created_at, task_id
+            """
+        ).fetchall()
+        counters: dict[tuple[str, str], int] = {}
+        for row in rows:
+            key = (row["context_id"], row["conversation_id"] or "")
+            counters[key] = counters.get(key, 0) + 1
+            if int(row["turn_index"] or 0) <= 0:
+                db.execute(
+                    "UPDATE tasks SET turn_index=? WHERE task_id=?",
+                    (counters[key], row["task_id"]),
+                )
 
     def connect_context(
         self,
@@ -388,16 +494,66 @@ class Storage:
         prompt: str | None = None,
     ) -> dict[str, Any]:
         now = utc_now()
+        telemetry_queued = False
         with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            context = db.execute(
+                "SELECT conversation_id FROM contexts WHERE context_id=?",
+                (context_id,),
+            ).fetchone()
+            if not context:
+                raise ValueError("task context does not exist")
+            conversation_id = str(context["conversation_id"])
+            row = db.execute(
+                """
+                SELECT COALESCE(MAX(turn_index), 0) AS value
+                FROM tasks WHERE context_id=? AND conversation_id=?
+                """,
+                (context_id, conversation_id),
+            ).fetchone()
+            turn_index = int(row["value"]) + 1
             db.execute(
                 """
                 INSERT INTO tasks(
-                    task_id, context_id, stream_token_hash, kind, status, stage, progress,
+                    task_id, context_id, conversation_id, turn_index,
+                    stream_token_hash, kind, status, stage, progress,
                     prompt, request_json, created_at, updated_at, heartbeat_at
-                ) VALUES (?, ?, ?, ?, 'queued', 'queued', 0, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, 'queued', 'queued', 0, ?, ?, ?, ?, ?)
                 """,
-                (task_id, context_id, hash_token(stream_token), kind, prompt, json.dumps(request, ensure_ascii=False), now, now, now),
+                (
+                    task_id,
+                    context_id,
+                    conversation_id,
+                    turn_index,
+                    hash_token(stream_token),
+                    kind,
+                    prompt,
+                    json.dumps(request, ensure_ascii=False),
+                    now,
+                    now,
+                    now,
+                ),
             )
+            if self.tls_logging and self.tls_logging.enabled:
+                telemetry_queued = bool(
+                    enqueue_trace_event(
+                        db,
+                        self.tls_logging,
+                        context_id=context_id,
+                        conversation_id=conversation_id,
+                        turn_id=task_id,
+                        turn_index=turn_index,
+                        turn_kind=kind,
+                        event_sequence=0,
+                        event_type=(
+                            "user_input" if kind == "coding" else "direct_deploy_input"
+                        ),
+                        event_data=request,
+                        created_at=now,
+                    )
+                )
+        if telemetry_queued and self.telemetry_notify:
+            self.telemetry_notify()
         return self.get_task(task_id)
 
     def get_task(self, task_id: str) -> dict[str, Any] | None:
@@ -485,8 +641,16 @@ class Storage:
         with self.connect() as db:
             db.execute("UPDATE tasks SET heartbeat_at=?, updated_at=? WHERE task_id=?", (now, now, task_id))
 
-    def append_event(self, task_id: str, event_type: str, data: dict[str, Any]) -> dict[str, Any]:
+    def append_event(
+        self,
+        task_id: str,
+        event_type: str,
+        data: dict[str, Any],
+        *,
+        telemetry_data: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         now = utc_now()
+        telemetry_queued = False
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute(
@@ -497,9 +661,44 @@ class Storage:
                 "INSERT INTO task_events(task_id, sequence, event_type, data_json, created_at) VALUES (?, ?, ?, ?, ?)",
                 (task_id, sequence, event_type, json.dumps(data, ensure_ascii=False), now),
             )
+            should_enqueue_telemetry = should_enqueue_trace_event(
+                event_type,
+                data,
+                telemetry_data,
+            )
+            if (
+                self.tls_logging
+                and self.tls_logging.enabled
+                and should_enqueue_telemetry
+            ):
+                task = db.execute(
+                    """
+                    SELECT context_id, conversation_id, turn_index, kind
+                    FROM tasks WHERE task_id=?
+                    """,
+                    (task_id,),
+                ).fetchone()
+                if task:
+                    telemetry_queued = bool(
+                        enqueue_trace_event(
+                            db,
+                            self.tls_logging,
+                            context_id=task["context_id"],
+                            conversation_id=task["conversation_id"],
+                            turn_id=task_id,
+                            turn_index=int(task["turn_index"]),
+                            turn_kind=task["kind"],
+                            event_sequence=sequence,
+                            event_type=event_type,
+                            event_data=telemetry_data if telemetry_data is not None else data,
+                            created_at=now,
+                        )
+                    )
             cutoff = sequence - self.event_retention
             if cutoff > 0:
                 db.execute("DELETE FROM task_events WHERE task_id=? AND sequence<=?", (task_id, cutoff))
+        if telemetry_queued and self.telemetry_notify:
+            self.telemetry_notify()
         return {"sequence": sequence, "type": event_type, "data": data, "created_at": now}
 
     def list_events(self, task_id: str, after: int = 0, limit: int = 200) -> list[dict[str, Any]]:

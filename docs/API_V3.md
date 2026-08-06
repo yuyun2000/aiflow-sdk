@@ -82,11 +82,18 @@ AIFLOW_CLAUDE_SUPPORTS_IMAGE_INPUT="false"
     "total_capacity": 24,
     "available": 17,
     "accepting_new": true
+  },
+  "conversation_logging": {
+    "enabled": true,
+    "pending_records": 0,
+    "oldest_created_at": null,
+    "max_attempts": 0,
+    "worker_running": true
   }
 }
 ```
 
-`used` 是持久化设备项目占用，`recently_active` 是活动窗口内发送过鉴权请求的设备数。`state` 为 `available`、`busy`、`queue_full` 或 `session_full`。该接口不包含任何设备标识，前端可低频轮询。
+`used` 是持久化设备项目占用，`recently_active` 是活动窗口内发送过鉴权请求的设备数。`state` 为 `available`、`busy`、`queue_full` 或 `session_full`。`conversation_logging.pending_records` 是尚未收到 TLS 成功响应的持久化记录数；持续增长表示日志上传异常，但不阻断任务执行。该接口不包含任何设备标识，前端可低频轮询。
 
 ## 3. deviceId + clientId 连接与项目
 
@@ -312,14 +319,18 @@ queued -> running -> completed
 服务端会持久化并透传可公开的 Agent/SDK 行为：
 
 - 生命周期：`agent_connected`、`agent_system`、`agent_status`、`agent_warning`、`agent_rate_limit`、`agent_result`、`agent_result_error`、`agent_sdk_event`。
-- 输出：`assistant_message_started`、`assistant_text_delta`、`assistant_message`、`assistant_message_finished`。
+- 输出：`assistant_message_started`、`assistant_text_delta`、`assistant_message`、`assistant_message_finished`；模型思考为 `agent_reasoning`，中断兜底为 `agent_partial_capture`。
 - 工具：`tool_started`、`tool_finished`、`server_tool_started`、`server_tool_finished`、`agent_user_message`、`agent_user_content`。
-- 原始流状态：`agent_stream_event`；隐藏推理阶段只发送不含原文的 `agent_reasoning`。
+- 原始流状态：`agent_stream_event`。
 - 服务任务：`task_queued`、`task_started`、`file_ready`、`deployment_started`、`deployment_finished`、`cancellation_requested`、`task_completed`、`task_failed`、`task_cancelled`、`heartbeat`。
 
-`assistant_text_delta` 是实时增量并带 `finalized=false`；`assistant_message` 是 SDK 最终完整块并带 `finalized=true`。服务端从原始 `message_start.message.id` 与最终 `AssistantMessage.message_id` 生成统一 `response_id`，并保留内容块 `block_index`。客户端必须以 `response_id + block_index` 为键追加 delta，再用最终块覆盖校准；最终块到达后忽略同键晚到 delta，不能把完整块和增量各渲染一遍。SDK 外层 `message_uuid` 仅用于诊断，不能作为这两类事件的关联键。
+Agent 的所有公开文本块使用用户本人最近一条可识别的自然语言；用户明确指定回复语言时优先。服务不会根据 UIFlow/API 术语、Skill/MCP、官方文档、代码、日志或工具结果的语种切换回复语言。混合语言请求以用户自然语言句子的主体为准，代码、命令、API 名称、标识符和产品名在直译不自然时保留原文。当前请求无语种信号时沿用会话中最近的用户语种；全新且只有附件的请求使用客户端默认简体中文。
 
-`tool_started` 和 `tool_finished` 通过 `tool_use_id` 关联，分别携带已脱敏的真实完整 `input` 与 `content/result`。逐字符 `input_json_delta`、签名碎片和高频 `thinking_tokens` 不会单独持久化或下发，也不会转换成“正在组织参数”等推测状态。事件中的绝对工作区路径、`deviceId`、`clientId`、凭据和签名会统一脱敏；单个长文本也会截断。隐藏 chain-of-thought 不会对外发送，`agent_reasoning` 最多每个响应块每秒发送一次安全活动信号。
+`assistant_text_delta` 和流式 `agent_reasoning` 都是实时增量并带 `finalized=false`，正文分别位于 `text` 和 `thinking`；最终 `assistant_message` 和 `agent_reasoning` 带 `finalized=true` 并携带 SDK 最终完整块。服务端从原始 `message_start.message.id` 与最终 `AssistantMessage.message_id` 生成统一 `response_id`，并保留内容块 `block_index`。客户端必须按内容类型分别以 `response_id + block_index` 为键追加 delta，再用最终块覆盖校准；最终块到达后忽略同键晚到 delta，不能把完整块和增量各渲染一遍。流中断时，thinking 的 `agent_partial_capture` 带 `partial=true`、`finalized=false` 和已收到的累计 `thinking`，同样用于覆盖校准。SDK 外层 `message_uuid` 仅用于诊断，不能作为增量与最终消息的关联键。
+
+`tool_started` 和 `tool_finished` 通过 `tool_use_id` 关联，分别携带已脱敏的真实完整 `input` 与 `content/result`。逐字符 `input_json_delta`、签名碎片和高频 `thinking_tokens` 不会单独持久化或下发，也不会转换成“正在组织参数”等推测状态。SDK 实际提供的每个 `thinking_delta` 会作为 `agent_reasoning` 实时持久化和下发，不再节流为空活动标记。事件中的绝对工作区路径、`deviceId`、`clientId`、凭据和签名会统一脱敏；thinking 正文完整保留，其他单个长文本仍可能截断。
+
+启用 TLS 对话审计时，公开 API 中的 thinking 与 TLS 最终审计记录来自同一 SDK 内容，但用途和粒度不同：SSE/`task_events` 保留每个脱敏 delta 供实时与断线恢复；TLS 不上传这些 delta，只在收到最终 `AssistantMessage` 后把完整 thinking 块写入 outbox，流中断时才上传一次 `agent_partial_capture`。逻辑事件在上传前去重，TLS 至少一次投递造成的物理重传由消费端按 `record_id` 去重。具体覆盖矩阵、schema 和权限边界见 [CONVERSATION_LOGGING.md](CONVERSATION_LOGGING.md)。
 
 ### `GET /api/v3/tasks/{task_id}/events/history?after=N&limit=200`
 
@@ -332,7 +343,7 @@ queued -> running -> completed
 - `GET /api/v3/files/{path}`：下载项目文件。
 - `POST /api/v3/conversation/reset`：生成新对话；`keep_files=false` 同时清空用户文件。
 - `GET /api/v3/conversations`：返回 `device_id` 和该项目 Claude session 摘要。
-- `GET /api/v3/conversations/{session_id}/messages`：读取当前设备项目内的 session 消息并替换内部绝对路径。
+- `GET /api/v3/conversations/{session_id}/messages`：读取当前设备项目内的原始 session message 结构；SDK transcript 中存在的 thinking 正文会完整返回，内部绝对路径、凭据、设备标识和 provider signature 会脱敏。
 
 ## 10. 关键状态码
 

@@ -10,6 +10,7 @@ from .agent import AgentCancelled, AgentError, ClaudeRunner
 from .config import Settings
 from .device_push import DeploymentError, DevicePusher
 from .storage import TERMINAL_STATUSES, Storage, new_token, utc_now
+from .telemetry import TLS_EVENT_DATA_KEY, TlsTelemetry
 from .workspaces import WorkspaceManager
 
 
@@ -46,12 +47,14 @@ class TaskManager:
         workspaces: WorkspaceManager,
         runner: ClaudeRunner,
         pusher: DevicePusher,
+        telemetry: TlsTelemetry | None = None,
     ):
         self.settings = settings
         self.storage = storage
         self.workspaces = workspaces
         self.runner = runner
         self.pusher = pusher
+        self.telemetry = telemetry
         self._jobs: dict[str, asyncio.Task[None]] = {}
         self._cancel_events: dict[str, asyncio.Event] = {}
         self._event_subscribers: dict[str, set[asyncio.Event]] = {}
@@ -79,8 +82,22 @@ class TaskManager:
             signal.set()
         return event
 
-    def _append_event(self, task_id: str, event_type: str, data: dict[str, Any]) -> dict[str, Any]:
-        event = self.storage.append_event(task_id, event_type, data)
+    def _append_event(
+        self,
+        task_id: str,
+        event_type: str,
+        data: dict[str, Any],
+        telemetry_data: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        if telemetry_data is None:
+            event = self.storage.append_event(task_id, event_type, data)
+        else:
+            event = self.storage.append_event(
+                task_id,
+                event_type,
+                data,
+                telemetry_data=telemetry_data,
+            )
         return self._publish_event(task_id, event_type, event)
 
     async def _append_event_async(
@@ -88,8 +105,23 @@ class TaskManager:
         task_id: str,
         event_type: str,
         data: dict[str, Any],
+        telemetry_data: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        event = await asyncio.to_thread(self.storage.append_event, task_id, event_type, data)
+        if telemetry_data is None:
+            event = await asyncio.to_thread(
+                self.storage.append_event,
+                task_id,
+                event_type,
+                data,
+            )
+        else:
+            event = await asyncio.to_thread(
+                self.storage.append_event,
+                task_id,
+                event_type,
+                data,
+                telemetry_data=telemetry_data,
+            )
         return self._publish_event(task_id, event_type, event)
 
     async def start_coding(self, context: dict[str, Any], request: dict[str, Any]) -> tuple[dict[str, Any], str]:
@@ -175,6 +207,7 @@ class TaskManager:
 
     async def _emit(self, task_id: str, event_type: str, data: dict[str, Any], agent_event: bool = False) -> None:
         payload = dict(data)
+        telemetry_data = payload.pop(TLS_EVENT_DATA_KEY, None)
         if agent_event:
             payload.pop("progress", None)
         updates: dict[str, Any] = {}
@@ -196,7 +229,12 @@ class TaskManager:
             updates["stage"] = payload["stage"]
         if updates:
             await asyncio.to_thread(self.storage.update_task, task_id, **updates)
-        await self._append_event_async(task_id, event_type, payload)
+        await self._append_event_async(
+            task_id,
+            event_type,
+            payload,
+            telemetry_data=telemetry_data,
+        )
 
     async def _heartbeat(self, task_id: str, cancel_event: asyncio.Event) -> None:
         while not cancel_event.is_set():
@@ -218,7 +256,19 @@ class TaskManager:
                 last_agent_event_at=now,
             )
             self._last_agent_activity_write_at[task_id] = time.monotonic()
-            await self._emit(task_id, "task_started", {"status": "running", "stage": "preparing_workspace", "message": "Preparing isolated workspace"})
+            await self._emit(
+                task_id,
+                "task_started",
+                {
+                    "status": "running",
+                    "stage": "preparing_workspace",
+                    "message": "Preparing isolated workspace",
+                    TLS_EVENT_DATA_KEY: {
+                        "status": "running",
+                        "stage": "preparing_workspace",
+                    },
+                },
+            )
             self.workspaces.initialize(context["context_id"], context["device"])
             if cancel_event.is_set():
                 raise AgentCancelled()
@@ -246,12 +296,28 @@ class TaskManager:
             workspace = self.workspaces.workspace_for(context["context_id"])
             files = self.workspaces.list_files(workspace)
             for item in files:
-                await self._emit(task_id, "file_ready", {**item, "download_url": f"/api/v3/files/{item['path']}"})
+                await self._emit(
+                    task_id,
+                    "file_ready",
+                    {
+                        **item,
+                        "download_url": f"/api/v3/files/{item['path']}",
+                        TLS_EVENT_DATA_KEY: dict(item),
+                    },
+                )
 
             deployment = None
             if request.get("deploy_mode") == "server":
                 self.storage.update_task(task_id, stage="deploying")
-                await self._emit(task_id, "deployment_started", {"stage": "deploying", "message": "Pushing generated files to device"})
+                await self._emit(
+                    task_id,
+                    "deployment_started",
+                    {
+                        "stage": "deploying",
+                        "message": "Pushing generated files to device",
+                        TLS_EVENT_DATA_KEY: {"stage": "deploying"},
+                    },
+                )
                 deployment = await self.pusher.deploy(context)
                 await self._emit(task_id, "deployment_finished", {"stage": "finalizing", "result": deployment})
 
@@ -264,7 +330,26 @@ class TaskManager:
                 result_json=payload,
                 finished_at=utc_now(),
             )
-            self._append_event(task_id, "task_completed", {"status": "completed", "stage": "completed", "progress": 100, "result": payload})
+            self._append_event(
+                task_id,
+                "task_completed",
+                {
+                    "status": "completed",
+                    "stage": "completed",
+                    "progress": 100,
+                    "result": payload,
+                },
+                telemetry_data={
+                    "status": "completed",
+                    "stage": "completed",
+                    "progress": 100,
+                    "references": {
+                        "agent_result": True,
+                        "file_ready_count": len(files),
+                        "deployment_finished": deployment is not None,
+                    },
+                },
+            )
         except AgentCancelled:
             self._finish_cancelled(task_id)
         except (AgentError, DeploymentError) as exc:
@@ -292,11 +377,31 @@ class TaskManager:
                 stage="validating_deployment",
                 started_at=utc_now(),
             )
-            await self._emit(task_id, "task_started", {"status": "running", "stage": "validating_deployment", "message": "Validating saved code and device target"})
+            await self._emit(
+                task_id,
+                "task_started",
+                {
+                    "status": "running",
+                    "stage": "validating_deployment",
+                    "message": "Validating saved code and device target",
+                    TLS_EVENT_DATA_KEY: {
+                        "status": "running",
+                        "stage": "validating_deployment",
+                    },
+                },
+            )
             if cancel_event.is_set():
                 raise AgentCancelled()
             self.storage.update_task(task_id, stage="deploying")
-            await self._emit(task_id, "deployment_started", {"stage": "deploying", "message": "Re-running saved code without Agent"})
+            await self._emit(
+                task_id,
+                "deployment_started",
+                {
+                    "stage": "deploying",
+                    "message": "Re-running saved code without Agent",
+                    TLS_EVENT_DATA_KEY: {"stage": "deploying"},
+                },
+            )
             result = await self.pusher.deploy(
                 context,
                 code_path=request.get("code_path", "main.py"),
@@ -407,6 +512,17 @@ class TaskManager:
                 "available": max(0, task_capacity - task_used),
                 "accepting_new": task_used < task_capacity,
             },
+            "conversation_logging": (
+                self.telemetry.status()
+                if self.telemetry
+                else {
+                    "enabled": False,
+                    "pending_records": 0,
+                    "oldest_created_at": None,
+                    "max_attempts": 0,
+                    "worker_running": False,
+                }
+            ),
         }
 
     def status(self, task: dict[str, Any]) -> dict[str, Any]:

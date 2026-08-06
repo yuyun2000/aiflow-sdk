@@ -77,3 +77,35 @@ def test_legacy_context_schema_migrates_to_device_id_reconnect(tmp_path):
     assert storage.get_context_by_token("old-token") is None
     assert storage.get_context_by_token("new-token")["device_id"] == "device-legacy"
     assert storage.get_context_by_token("new-token")["device"]["client_id"] == "client-legacy"
+
+
+def test_restart_marks_interrupted_task_with_terminal_event(tmp_path):
+    database = tmp_path / "aiflow.sqlite3"
+    storage = Storage(database)
+    storage.connect_context(
+        "ctx_restart",
+        "context-token",
+        "conv_restart",
+        "restart fixture",
+        {"device_id": "device-restart", "client_id": "client-restart"},
+        max_sessions=10,
+    )
+    task = storage.create_task(
+        "task_restart",
+        "ctx_restart",
+        "stream-token",
+        "coding",
+        {"prompt": "unfinished", "attachments": []},
+    )
+    storage.append_event(task["task_id"], "task_started", {"status": "running"})
+    storage.update_task(task["task_id"], status="running", stage="coding")
+
+    restarted = Storage(database)
+
+    recovered = restarted.get_task(task["task_id"])
+    assert recovered["status"] == "failed"
+    assert recovered["stage"] == "server_restarted"
+    assert recovered["conversation_id"] == "conv_restart"
+    assert recovered["turn_index"] == 1
+    assert restarted.last_event(task["task_id"])["type"] == "task_failed"
+    assert restarted.last_event(task["task_id"])["data"]["error"]["code"] == "server_restarted"

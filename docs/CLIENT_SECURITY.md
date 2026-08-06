@@ -130,14 +130,15 @@ response_timestamp
 
 ## 6. Agent 事件边界
 
-服务端开启 Claude SDK partial messages，并将有独立展示价值的生命周期、助手文本增量与最终块、完整工具输入/结果、服务端工具、限流、用量、结果和异常按序写入 SQLite，再通过 SSE 发送。逐字符工具参数、签名碎片和高频隐藏推理计数会在写库前过滤，以免单个任务产生上万次无意义写入。高频事件持久化在线程池完成，落库后回到事件循环唤醒 SSE；SQLite 使用 WAL 与 `synchronous=NORMAL`，避免虚拟磁盘的逐事件 fsync 反压模型流。正常服务重启仍会保留事件；宿主机突然断电时，最新少量事务的持久性弱于 `FULL`，但 WAL 数据库仍保持一致。默认每任务保留最近 `10000` 条，可通过 `tasks.event_retention` 调整；内置客户端的原始事件区只保留最近 `2000` 条 DOM 记录。
+服务端开启 Claude SDK partial messages，并将有独立展示价值的生命周期、助手文本与 thinking 增量及最终块、完整工具输入/结果、服务端工具、限流、用量、结果和异常按序写入 SQLite，再通过 SSE 发送。逐字符工具参数、签名碎片和高频 `thinking_tokens` 计数会在写库前过滤；实际 `thinking_delta` 正文不会过滤或节流。高频事件持久化在线程池完成，落库后回到事件循环唤醒 SSE；SQLite 使用 WAL 与 `synchronous=NORMAL`，避免虚拟磁盘的逐事件 fsync 反压模型流。正常服务重启仍会保留事件；宿主机突然断电时，最新少量事务的持久性弱于 `FULL`，但 WAL 数据库仍保持一致。默认每任务保留最近 `10000` 条，可通过 `tasks.event_retention` 调整；内置客户端的原始事件区只保留最近 `2000` 条 DOM 记录。
 
 客户端决定展示策略：实时 UI 可拼接 `assistant_text_delta`，历史 UI 可使用 `assistant_message`；同时消费两者时需按消息 ID 去重。工具事件通过 `tool_use_id` 配对。断线后使用 `/events/history?after=<sequence>` 补偿，再用 SSE 的 `Last-Event-ID` 继续。
 
 以下内容不会原样发送：
 
-- 模型隐藏 chain-of-thought 或 thinking 内容，只发送 `agent_reasoning` 状态及 `content_redacted=true`。
+- SDK 实际提供的 thinking 会经统一脱敏后进入浏览器、公开 API 和 SQLite `task_events`；这类内容属于高敏感数据，任务令牌、history/SSE 响应、TLS Topic 和本地数据库都必须采用最小权限、HTTPS、访问审计和有限保留期。
+- 会话消息 API 保留 SDK transcript 中的完整 thinking 正文，但继续脱敏 provider signature、凭据、设备标识和内部路径。
 - 绝对工作区路径、`deviceId`、`clientId`、环境中的 API key/token/password/secret、签名字段。
-- 超过单事件上限的长文本和过深/过大的结构。
+- 除公开 thinking 外，超过单事件上限的长文本和过深/过大的结构；thinking 保留完整脱敏正文以便最终块校准流式内容。
 
 这条边界由服务端强制执行，客户端不能请求关闭脱敏。
