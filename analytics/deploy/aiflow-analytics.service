@@ -1,0 +1,22 @@
+[Unit]
+Description=AIFlow Conversation Analytics
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=aiflow-analytics
+Group=aiflow-analytics
+WorkingDirectory=/opt/aiflow-sdk/analytics
+EnvironmentFile=/opt/aiflow-sdk/analytics/.env
+ExecStart=/opt/aiflow-sdk/analytics/.venv/bin/python server.py
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/aiflow-sdk/analytics/data /opt/aiflow-sdk/analytics/.runtime
+
+[Install]
+WantedBy=multi-user.target

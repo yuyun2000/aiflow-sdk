@@ -1,0 +1,4 @@
+fastapi>=0.111,<1
+uvicorn[standard]>=0.29,<1
+python-dotenv>=1.0,<2
+volcengine>=1.0.227,<2
