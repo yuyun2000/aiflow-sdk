@@ -621,6 +621,20 @@ def test_context_creation_requires_client_id_and_accepts_camel_case_aliases(serv
     assert legacy_alias.json()["mac_address"] == "66:55:44:33:22:11"
     assert "push_client_id" not in legacy_alias.json()["device"]
 
+    top_level_alias = client.post(
+        "/api/v3/contexts",
+        json={
+            "macAddress": "22:33:44:55:66:77",
+            "device": {
+                "device_id": "device-top-level-mac",
+                "client_id": "client-top-level-mac",
+            },
+        },
+    )
+    assert top_level_alias.status_code == 201, top_level_alias.text
+    assert top_level_alias.json()["mac_address"] == "22:33:44:55:66:77"
+    assert top_level_alias.json()["device"]["mac_address"] == "22:33:44:55:66:77"
+
 
 def test_global_concurrency_and_queue_limit(tmp_path):
     base = load_settings()

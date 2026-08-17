@@ -238,7 +238,7 @@ Claude Code SDK 会继承服务进程环境。当前服务显式用 `AIFLOW_CLAU
 }
 ```
 
-同一 `device_id` 再次调用 `POST /api/v3/contexts` 会返回原 `context_id`、项目和会话历史，更新本次提供的 `client_id`/MAC；省略 MAC 不会清除历史 MAC，且 `created=false`。输入同时兼容 `mac`、`macAddress`、`mac_address`。新令牌会使旧令牌失效，前端应立即替换 `sessionStorage` 中的值。
+同一 `device_id` 再次调用 `POST /api/v3/contexts` 会返回原 `context_id`、项目和会话历史，更新本次提供的 `client_id`/MAC；省略 MAC 不会清除历史 MAC，且 `created=false`。设备对象输入兼容 `mac`、`macAddress`、`mac_address`；为兼容旧客户端，这三个字段也可放在 `/contexts` 请求体顶层，嵌套设备字段优先。新令牌会使旧令牌失效，前端应立即替换 `sessionStorage` 中的值。
 
 服务端或 Agent 发起代码推送时使用 `deviceId` 路径参数；上传资源文件时同时发送 `deviceId` 和 `clientId`。两个值都只从初始化上下文机械读取，不放入 Agent 提示词，也不会用内部 `context_id` 兜底。
 

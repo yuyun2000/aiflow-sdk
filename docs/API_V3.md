@@ -130,7 +130,7 @@ AIFLOW_CLAUDE_SUPPORTS_IMAGE_INPUT="false"
 }
 ```
 
-`device_id` 和 `client_id` 都必填，也接受客户端常用的 `deviceId`、`clientId` 输入别名。`mac_address` 是可选字段，同时接受 `macAddress` 和 `mac` 输入别名，响应和持久化统一使用 `mac_address`。旧字段 `push_client_id` 暂时作为 `client_id` 的兼容输入，但响应和持久化统一使用 `client_id`。不传 MAC 的旧客户端请求仍然有效；已有设备重连时省略 MAC 会保留已绑定的 MAC。
+`device_id` 和 `client_id` 都必填，也接受客户端常用的 `deviceId`、`clientId` 输入别名。`device.mac_address` 是可选字段，同时接受 `device.macAddress` 和 `device.mac` 输入别名，响应和持久化统一使用 `mac_address`。为兼容已经把 MAC 放在请求体外层的客户端，`mac_address`、`macAddress`、`mac` 也可直接作为 `/contexts` 请求体字段；嵌套 `device` 字段优先。旧字段 `push_client_id` 暂时作为 `client_id` 的兼容输入，但响应和持久化统一使用 `client_id`。不传 MAC 的旧客户端请求仍然有效；已有设备重连时省略 MAC 会保留已绑定的 MAC。
 
 从 API `3.2` 开始，旧项目在再次 Coding 或部署前应使用同一 `deviceId` 携带真实 `clientId` 重连。服务端不会为旧数据生成或猜测 Client ID。
 

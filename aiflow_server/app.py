@@ -378,6 +378,8 @@ def create_app(
         access_token = new_token("ctx_secret_")
         conversation_id = "conv_" + uuid.uuid4().hex[:16]
         incoming_device = request.device.model_dump(exclude_none=True)
+        if request.mac_address and "mac_address" not in incoming_device:
+            incoming_device["mac_address"] = request.mac_address
         existing = storage.get_context_by_device_id(incoming_device["device_id"])
         # Reconnects may come from older clients that do not know about MAC.
         # Merge only supplied values so an omitted optional field never erases

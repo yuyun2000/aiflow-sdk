@@ -51,7 +51,25 @@ class ConnectDeviceInfo(DeviceInfo):
 
 class CreateContextRequest(StrictModel):
     label: str = Field(default="Web UIFlow client", min_length=1, max_length=200)
+    # Compatibility for clients that place the optional MAC beside `device`.
+    # The canonical request shape remains `device.mac_address`.
+    mac_address: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=64,
+        validation_alias=AliasChoices("mac_address", "macAddress", "mac"),
+    )
     device: ConnectDeviceInfo
+
+    @field_validator("mac_address")
+    @classmethod
+    def validate_top_level_mac(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized or any(ord(character) < 32 for character in normalized):
+            raise ValueError("MAC address must be non-empty and contain no control characters")
+        return normalized
 
 
 class UpdateDeviceRequest(StrictModel):
