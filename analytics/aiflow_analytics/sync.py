@@ -141,8 +141,15 @@ class SyncService:
                 logs = self.tls_client.search(start_ms, end_ms)
                 result = self.database.insert_logs(logs)
                 _merge_totals(totals, result)
+                fallback_checked = bool(
+                    getattr(self.tls_client, "last_search_used_fallback", False)
+                )
                 if current < today:
-                    self.database.mark_day_synced(current.isoformat(), result)
+                    self.database.mark_day_synced(
+                        current.isoformat(),
+                        result,
+                        fallback_checked=fallback_checked,
+                    )
                 LOGGER.info(
                     "Synced %s fetched=%d inserted=%d assembled=%d turns=%d errors=%d",
                     current,

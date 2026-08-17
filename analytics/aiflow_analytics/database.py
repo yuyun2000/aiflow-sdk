@@ -171,7 +171,8 @@ CREATE TABLE IF NOT EXISTS sync_days (
     fetched_count INTEGER NOT NULL,
     inserted_count INTEGER NOT NULL,
     assembled_count INTEGER NOT NULL,
-    error_count INTEGER NOT NULL
+    error_count INTEGER NOT NULL,
+    fallback_checked INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS sync_runs (
@@ -248,6 +249,15 @@ class Database:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as connection:
             connection.executescript(SCHEMA)
+            columns = {
+                str(row["name"])
+                for row in connection.execute("PRAGMA table_info(sync_days)").fetchall()
+            }
+            if "fallback_checked" not in columns:
+                connection.execute(
+                    "ALTER TABLE sync_days "
+                    "ADD COLUMN fallback_checked INTEGER NOT NULL DEFAULT 0"
+                )
 
     def ping(self) -> bool:
         try:
@@ -814,20 +824,27 @@ class Database:
                 ),
             )
 
-    def mark_day_synced(self, event_date: str, result: dict[str, int]) -> None:
+    def mark_day_synced(
+        self,
+        event_date: str,
+        result: dict[str, int],
+        *,
+        fallback_checked: bool = False,
+    ) -> None:
         with self._write_lock, self.connect() as connection:
             connection.execute(
                 """
                 INSERT INTO sync_days(
                     event_date, completed_at, fetched_count, inserted_count,
-                    assembled_count, error_count
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                    assembled_count, error_count, fallback_checked
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(event_date) DO UPDATE SET
                     completed_at=excluded.completed_at,
                     fetched_count=excluded.fetched_count,
                     inserted_count=excluded.inserted_count,
                     assembled_count=excluded.assembled_count,
-                    error_count=excluded.error_count
+                    error_count=excluded.error_count,
+                    fallback_checked=excluded.fallback_checked
                 """,
                 (
                     event_date,
@@ -836,13 +853,20 @@ class Database:
                     result["inserted"],
                     result["assembled"],
                     result["errors"],
+                    int(fallback_checked),
                 ),
             )
 
     def day_is_synced(self, event_date: str) -> bool:
         return (
             self.query_one(
-                "SELECT 1 FROM sync_days WHERE event_date=? AND error_count=0",
+                """
+                SELECT 1
+                FROM sync_days
+                WHERE event_date=?
+                  AND error_count=0
+                  AND (fetched_count > 0 OR fallback_checked=1)
+                """,
                 (event_date,),
             )
             is not None
@@ -860,7 +884,9 @@ class Database:
             """
             SELECT COUNT(*) AS count
             FROM sync_days
-            WHERE event_date>=? AND event_date<=? AND error_count=0
+            WHERE event_date>=? AND event_date<=?
+              AND error_count=0
+              AND (fetched_count > 0 OR fallback_checked=1)
             """,
             (start_date, end_date),
         )

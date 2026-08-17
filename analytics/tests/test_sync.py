@@ -66,6 +66,30 @@ def test_missing_history_is_retried_without_refetching_clean_days(settings, data
     assert database.historical_sync_needed("2026-08-01", "2026-08-01") is False
 
 
+def test_empty_fallback_result_is_marked_as_validated(settings, database) -> None:
+    class EmptyFallbackClient(FakeTLSClient):
+        last_search_used_fallback = True
+
+        def search(self, _start_ms: int, _end_ms: int, query: str | None = None):
+            self.calls += 1
+            return []
+
+    client = EmptyFallbackClient()
+    service = SyncService(settings, database, client)  # type: ignore[arg-type]
+
+    result = service.sync_range(date(2026, 8, 6), date(2026, 8, 6))
+
+    assert result["fetched"] == 0
+    marker = database.query_one(
+        "SELECT fetched_count, fallback_checked FROM sync_days WHERE event_date=?",
+        ("2026-08-06",),
+    )
+    assert marker is not None
+    assert marker["fetched_count"] == 0
+    assert marker["fallback_checked"] == 1
+    assert database.day_is_synced("2026-08-06") is True
+
+
 def test_current_day_is_not_marked_so_startup_can_refresh_it(settings, database) -> None:
     client = FakeTLSClient()
     service = SyncService(settings, database, client)  # type: ignore[arg-type]

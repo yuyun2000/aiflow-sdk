@@ -53,7 +53,7 @@ conversation 聚合不会重复累计同一轮用量。
 
 `event`、`schema_version`、`record_id`、`event_id`、`project_id`、`conversation_id`、`turn_id`、`turn_index`、`event_sequence`、`event_type`、`chunk_index`、`is_terminal`。
 
-默认查询为 `event:aiflow_conversation_trace`。没有索引不影响上传，但 `SearchLogsV2` 无法回填。建议为分析服务器创建只读 AK/SK，不复用上传凭据。
+默认查询为 `event:aiflow_conversation_trace`。如果该键值查询返回空结果，客户端会对同一时间窗口自动用 `*` 查询并在本地按 `event` 过滤，以兼容索引建立后历史日志未及时完成索引的情况；长期仍建议配置索引，否则回填会更慢且查询成本更高。建议为分析服务器创建只读 AK/SK，不复用上传凭据。
 
 ## 安装与运行
 
@@ -98,7 +98,7 @@ http://<服务器地址>:5090/
 
 - 首次启动从 `AIFLOW_ANALYTICS_START_DATE` 起逐日回填。
 - `AIFLOW_ANALYTICS_TLS_PAGE_SIZE` 应保持在 `1` 到 `100`；这是 Volcengine `SearchLogsV2` 的单页上限。旧配置写成更大的值时，客户端会自动按 `100` 请求并记录警告。
-- 已成功完成的历史日写入 `sync_days`，默认不重复拉取；缺少成功标记或上次有解析错误的日期会在后续周期自动重试。
+- 已成功完成的历史日写入 `sync_days`，默认不重复拉取；只有实际取到过记录，或通配查询已确认该日没有目标事件，才算完成。旧版本留下的 `fetched=0` 未验证标记、缺少成功标记或上次有解析错误的日期会在后续周期自动重试。
 - 每次服务启动都会重新拉取启动日的当天窗口；当天不会写入 `sync_days`，所以重启后仍会刷新当天日志。启动历史回填失败后，周期任务会先补齐历史缺口，再同步最近窗口，不需要再次手动删除数据库。
 - 当天每 `AIFLOW_ANALYTICS_SYNC_INTERVAL_SECONDS` 秒同步，并向前重叠 `AIFLOW_ANALYTICS_SYNC_OVERLAP_MINUTES` 分钟。
 - 重叠、分页重复和超时重发均由 `record_id` 幂等处理。

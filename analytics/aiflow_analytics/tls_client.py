@@ -21,6 +21,7 @@ class TLSLogClient:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self._client: TLSService | None = None
+        self.last_search_used_fallback = False
 
     @property
     def configured(self) -> bool:
@@ -68,14 +69,12 @@ class TLSLogClient:
             json.dumps(log, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
         ).hexdigest()
 
-    def search(
+    def _search_pages(
         self,
         start_ms: int,
         end_ms: int,
-        query: str | None = None,
+        query: str,
     ) -> list[dict[str, Any]]:
-        if start_ms > end_ms:
-            return []
         client = self._get_client()
         context = ""
         seen_contexts: set[str] = set()
@@ -93,7 +92,7 @@ class TLSLogClient:
         for page in range(1, self.settings.tls_max_pages + 1):
             request = SearchLogsRequest(
                 topic_id=self.settings.tls_topic_id,
-                query=query or self.settings.tls_query,
+                query=query,
                 limit=page_limit,
                 start_time=start_ms,
                 end_time=end_ms,
@@ -139,6 +138,33 @@ class TLSLogClient:
                 f"AIFLOW_ANALYTICS_TLS_MAX_PAGES={self.settings.tls_max_pages}"
             )
         return logs
+
+    def search(
+        self,
+        start_ms: int,
+        end_ms: int,
+        query: str | None = None,
+    ) -> list[dict[str, Any]]:
+        self.last_search_used_fallback = False
+        if start_ms > end_ms:
+            return []
+        effective_query = query if query is not None else self.settings.tls_query
+        logs = self._search_pages(start_ms, end_ms, effective_query)
+        if logs or not effective_query.startswith("event:"):
+            return logs
+
+        event_name = effective_query.removeprefix("event:").strip()
+        if not event_name or any(char.isspace() for char in event_name):
+            return logs
+        LOGGER.warning(
+            "TLS query returned no records for %s; retrying wildcard and filtering locally",
+            effective_query,
+        )
+        self.last_search_used_fallback = True
+        fallback_logs = self._search_pages(start_ms, end_ms, "*")
+        return [
+            log for log in fallback_logs if str(log.get("event") or "") == event_name
+        ]
 
 
 def milliseconds(value: datetime) -> int:

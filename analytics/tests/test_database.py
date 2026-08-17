@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import sqlite3
+
+from aiflow_analytics.database import Database
+
 from .fixtures import complete_turn, event_records
 
 
@@ -100,3 +104,48 @@ def test_historical_sync_needed_tracks_clean_completed_days(database) -> None:
         {"fetched": 1, "inserted": 1, "assembled": 1, "errors": 0},
     )
     assert database.historical_sync_needed("2026-08-01", "2026-08-03") is False
+
+
+def test_initialize_migrates_legacy_sync_days_and_requires_fallback_validation(
+    tmp_path,
+    settings,
+) -> None:
+    path = tmp_path / "legacy.sqlite3"
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE sync_days (
+                event_date TEXT PRIMARY KEY,
+                completed_at TEXT NOT NULL,
+                fetched_count INTEGER NOT NULL,
+                inserted_count INTEGER NOT NULL,
+                assembled_count INTEGER NOT NULL,
+                error_count INTEGER NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO sync_days(
+                event_date, completed_at, fetched_count, inserted_count,
+                assembled_count, error_count
+            ) VALUES ('2026-08-06', '2026-08-17T00:00:00Z', 0, 0, 0, 0)
+            """
+        )
+
+    database = Database(path, settings.tls_schema_version)
+    database.initialize()
+
+    with database.connect() as connection:
+        columns = connection.execute("PRAGMA table_info(sync_days)").fetchall()
+    assert "fallback_checked" in {str(row["name"]) for row in columns}
+    assert database.day_is_synced("2026-08-06") is False
+    assert database.historical_sync_needed("2026-08-06", "2026-08-06") is True
+
+    database.mark_day_synced(
+        "2026-08-06",
+        {"fetched": 0, "inserted": 0, "assembled": 0, "errors": 0},
+        fallback_checked=True,
+    )
+    assert database.day_is_synced("2026-08-06") is True
+    assert database.historical_sync_needed("2026-08-06", "2026-08-06") is False
