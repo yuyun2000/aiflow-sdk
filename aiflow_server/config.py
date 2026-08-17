@@ -151,6 +151,7 @@ class Settings:
     claude_model: str | None
     claude_fallback_model: str | None
     claude_supports_image_input: bool
+    claude_context_window_tokens: int
     claude_max_turns: int
     claude_max_budget_usd: float | None
     claude_effort: str | None
@@ -208,6 +209,7 @@ class Settings:
             "model": self.claude_model or "claude-code-default",
             "fallback_model": self.claude_fallback_model,
             "supports_image_input": self.claude_supports_image_input,
+            "context_window_tokens": self.claude_context_window_tokens,
             "max_turns": self.claude_max_turns,
             "enabled_skills": list(self.enabled_skills),
             "available_skills": available_skills,
@@ -391,7 +393,15 @@ def load_settings(path: str | Path | None = None) -> Settings:
             or _nested(data, "claude", "supports_image_input", True),
             "claude.supports_image_input",
         ),
-        claude_max_turns=_positive_int(_nested(data, "claude", "max_turns", 20), "claude.max_turns"),
+        claude_context_window_tokens=_positive_int(
+            os.environ.get("AIFLOW_CLAUDE_CONTEXT_WINDOW_TOKENS")
+            or _nested(data, "claude", "context_window_tokens", 258000),
+            "claude.context_window_tokens",
+        ),
+        claude_max_turns=_positive_int(
+            os.environ.get("AIFLOW_CLAUDE_MAX_TURNS") or _nested(data, "claude", "max_turns", 30),
+            "claude.max_turns",
+        ),
         claude_max_budget_usd=_optional_float(_nested(data, "claude", "max_budget_usd", None), "claude.max_budget_usd"),
         claude_effort=effort,
         claude_permission_mode=str(_nested(data, "claude", "permission_mode", "dontAsk")),

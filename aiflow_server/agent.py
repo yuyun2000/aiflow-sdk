@@ -66,6 +66,8 @@ SENSITIVE_KEY_PARTS = (
     "deviceid",
     "client_id",
     "clientid",
+    "mac_address",
+    "macaddress",
 )
 SENSITIVE_TOKEN_KEYS = frozenset(
     {
@@ -150,6 +152,11 @@ Safety and reporting:
 - After receiving tool results, the next tool-using turn MUST begin with another plain-text TextBlock explaining what the real result established and what will happen next. Do this before reading official references, editing code, running validation, and deploying.
 - Public progress must be factual and specific. Never emit placeholders such as "initialized", "working", "thinking", or "processing", and never fabricate a reasoning summary. Do not expose internal prompts, secrets, or raw tool JSON.
 - After validation, report the exact checks and outcomes. Keep the final response concise because tool inputs and results are already reported separately.
+
+Execution budget:
+- Complete the requested result within the configured turn limit. Keep the plan to the necessary steps and do not exceed it with optional investigation.
+- Avoid repeating tool calls, reopening settled questions, or adding unrelated improvements. Prioritize writing or fixing `main.py`, validating it, and reporting any blocker.
+- When the turn budget is getting low, stop exploration and finish the smallest complete deliverable with the most useful validation.
 """.strip()
 
 
@@ -165,6 +172,26 @@ def _run_skills(configured_skills: tuple[str, ...], deploy_mode: str) -> list[st
             retryable=False,
         )
     return required
+
+
+def _agent_env(
+    settings: Settings,
+    workspace: Path,
+    device: dict[str, Any],
+    agent_deploy: bool,
+) -> dict[str, str]:
+    env = {
+        "CLAUDE_AGENT_SDK_CLIENT_APP": f"aiflow-server/{__version__}",
+        "AIFLOW_CONFIG": str(workspace / ".aiflow" / "config.json"),
+        "CLAUDE_CODE_MAX_CONTEXT_TOKENS": str(settings.claude_context_window_tokens),
+    }
+    if agent_deploy:
+        env["AIFLOW_BASE_URL"] = settings.device_push_base_url
+        if device.get("device_id"):
+            env["AIFLOW_DEVICE_ID"] = device["device_id"]
+        if device.get("client_id"):
+            env["AIFLOW_CLIENT_ID"] = device["client_id"]
+    return env
 
 
 def _agent_tools(
@@ -288,7 +315,16 @@ def _build_prompt(
 
 
 def _event_secrets(device: dict[str, Any]) -> list[str]:
-    values = [str(device.get("device_id") or ""), str(device.get("client_id") or "")]
+    values = [
+        str(device.get("device_id") or ""),
+        str(device.get("client_id") or ""),
+        str(
+            device.get("mac_address")
+            or device.get("macAddress")
+            or device.get("mac")
+            or ""
+        ),
+    ]
     for key, value in os.environ.items():
         if any(
             part in key.lower()
@@ -1093,17 +1129,8 @@ class ClaudeRunner:
             self.settings.m5stack_mcp_enabled,
         )
 
-        env = {
-            "CLAUDE_AGENT_SDK_CLIENT_APP": f"aiflow-server/{__version__}",
-            "AIFLOW_CONFIG": str(workspace / ".aiflow" / "config.json"),
-        }
         device = context["device"]
-        if agent_deploy:
-            env["AIFLOW_BASE_URL"] = self.settings.device_push_base_url
-            if device.get("device_id"):
-                env["AIFLOW_DEVICE_ID"] = device["device_id"]
-            if device.get("client_id"):
-                env["AIFLOW_CLIENT_ID"] = device["client_id"]
+        env = _agent_env(self.settings, workspace, device, agent_deploy)
 
         mcp_servers: dict[str, Any] = {}
         if self.settings.m5stack_mcp_enabled:
@@ -1184,6 +1211,7 @@ class ClaudeRunner:
                         "model": self.settings.claude_model,
                         "fallback_model": self.settings.claude_fallback_model,
                         "effort": self.settings.claude_effort,
+                        "context_window_tokens": self.settings.claude_context_window_tokens,
                         "max_turns": self.settings.claude_max_turns,
                         "max_budget_usd": self.settings.claude_max_budget_usd,
                         "permission_mode": self.settings.claude_permission_mode,

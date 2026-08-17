@@ -377,8 +377,13 @@ def create_app(
         context_id = "ctx_" + uuid.uuid4().hex[:16]
         access_token = new_token("ctx_secret_")
         conversation_id = "conv_" + uuid.uuid4().hex[:16]
-        device = request.device.model_dump()
-        existing = storage.get_context_by_device_id(device["device_id"])
+        incoming_device = request.device.model_dump(exclude_none=True)
+        existing = storage.get_context_by_device_id(incoming_device["device_id"])
+        # Reconnects may come from older clients that do not know about MAC.
+        # Merge only supplied values so an omitted optional field never erases
+        # the value already bound to the device project.
+        device = dict(existing["device"]) if existing else {}
+        device.update(incoming_device)
         if existing and not storage.get_active_task(existing["context_id"]):
             workspaces.initialize(existing["context_id"], device)
         try:
@@ -411,6 +416,7 @@ def create_app(
             context_id=context["context_id"],
             device_id=context["device_id"],
             client_id=context["device"]["client_id"],
+            mac_address=context["device"].get("mac_address"),
             access_token=access_token,
             conversation_id=context["conversation_id"],
             label=context["label"],
@@ -428,6 +434,7 @@ def create_app(
             context_id=context["context_id"],
             device_id=context["device_id"],
             client_id=context["device"].get("client_id"),
+            mac_address=context["device"].get("mac_address"),
             conversation_id=context["conversation_id"],
             label=context["label"],
             device=DeviceInfo(**context["device"]),
@@ -451,6 +458,7 @@ def create_app(
             context_id=updated["context_id"],
             device_id=updated["device_id"],
             client_id=updated["device"].get("client_id"),
+            mac_address=updated["device"].get("mac_address"),
             conversation_id=updated["conversation_id"],
             label=updated["label"],
             device=DeviceInfo(**updated["device"]),
@@ -468,6 +476,7 @@ def create_app(
         return {
             "device_id": context["device_id"],
             "client_id": context["device"].get("client_id"),
+            "mac_address": context["device"].get("mac_address"),
             "context_id": context["context_id"],
             "conversation_id": context["conversation_id"],
             "current_session_id": context.get("session_id"),

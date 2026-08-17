@@ -221,6 +221,7 @@ def main() -> int:
     create.add_argument("--label", default="CLI smoke client")
     create.add_argument("--device-id", required=True)
     create.add_argument("--client-id", required=True)
+    create.add_argument("--mac", help="optional device MAC address")
     create.add_argument("--product")
 
     code = subparsers.add_parser("code")
@@ -242,13 +243,16 @@ def main() -> int:
         key_id, client_secret = load_client_secret(args.client_key_id, args.client_secret_file)
         api = AIFlowClient(args.base_url, args.token, key_id, client_secret, args.origin)
         if args.command == "create-context":
+            device = {
+                "device_id": args.device_id,
+                "client_id": args.client_id,
+                "product": args.product,
+            }
+            if args.mac:
+                device["mac_address"] = args.mac
             result = api.create_context(
                 args.label,
-                {
-                    "device_id": args.device_id,
-                    "client_id": args.client_id,
-                    "product": args.product,
-                },
+                device,
             )
         elif args.command == "code":
             if not args.token:

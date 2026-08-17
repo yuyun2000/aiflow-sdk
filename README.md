@@ -1,6 +1,6 @@
 # AIFlow Web Agent Service
 
-面向免登录网页客户端的 UIFlow2 Coding 与设备部署服务。初始化时客户端必须同时提供 `deviceId` 和 `clientId`；`deviceId` 是前后端统一项目主键，`clientId` 用于资源上传标识。每台设备由服务端签发能力令牌，并拥有独立 Claude Code 历史、项目工作区和任务状态。
+面向免登录网页客户端的 UIFlow2 Coding 与设备部署服务。初始化时客户端必须同时提供 `deviceId` 和 `clientId`，MAC 可选；`deviceId` 是前后端统一项目主键，`clientId` 用于资源上传标识。每台设备由服务端签发能力令牌，并拥有独立 Claude Code 历史、项目工作区和任务状态。
 
 ## 架构
 
@@ -21,7 +21,7 @@ flowchart LR
 
 核心行为：
 
-- 无账号登录。`POST /api/v3/contexts` 必须接收客户端传入的 `deviceId + clientId`；仍以 `deviceId` 幂等连接，新设备创建项目，已有设备复用历史、更新 `clientId` 并轮换能力令牌。
+- 无账号登录。`POST /api/v3/contexts` 必须接收客户端传入的 `deviceId + clientId`，并可选接收 MAC；仍以 `deviceId` 幂等连接，新设备创建项目，已有设备复用历史、更新提供的绑定字段并轮换能力令牌。
 - 公网只启动匿名 Web BFF。浏览器不持有签名密钥；BFF 用进程内随机密钥为每个内部请求签入时间戳、nonce 和请求体哈希，核心 API 不单独监听公网端口。
 - 网关按匿名 HttpOnly 会话和来源 IP 限流；核心另有 AI 分钟/每日、全局每日费用上限和有界并发队列。
 - 高频普通请求限流使用单进程内存窗口，AI 任务额度持久化到 SQLite 并在线程池执行，避免慢磁盘阻塞网页和 SSE。
@@ -116,6 +116,8 @@ cp .env.example .env.local
 ANTHROPIC_BASE_URL="https://your-provider.example.com"
 ANTHROPIC_AUTH_TOKEN="your-bearer-token"
 AIFLOW_CLAUDE_MODEL="your-provider-model-id"
+AIFLOW_CLAUDE_CONTEXT_WINDOW_TOKENS="258000"
+AIFLOW_CLAUDE_MAX_TURNS="30"
 AIFLOW_CLAUDE_SUPPORTS_IMAGE_INPUT="false"
 ```
 
@@ -123,6 +125,8 @@ AIFLOW_CLAUDE_SUPPORTS_IMAGE_INPUT="false"
 - `ANTHROPIC_AUTH_TOKEN`：使用 `Authorization: Bearer` 的网关令牌。
 - `ANTHROPIC_API_KEY`：使用 `x-api-key` 的提供方改用此变量；与 `ANTHROPIC_AUTH_TOKEN` 二选一。
 - `AIFLOW_CLAUDE_MODEL`：第三方实际暴露的完整 model ID，服务会作为 Claude Code 的 `--model` 传入。
+- `AIFLOW_CLAUDE_CONTEXT_WINDOW_TOKENS`：传给 Claude Code 的 `CLAUDE_CODE_MAX_CONTEXT_TOKENS`，控制自动压缩所使用的有效上下文上限；默认 `258000`（258K）。实际可用上限仍受提供方模型限制。
+- `AIFLOW_CLAUDE_MAX_TURNS`：Agent 单次任务最大对话轮次，默认 `30`。
 - `AIFLOW_CLAUDE_SUPPORTS_IMAGE_INPUT`：模型是否支持图片输入。DeepSeek 等纯文本模型设为 `false`；默认 `true`。
 
 `.env.local` 默认不进入 Git。也可以通过 `AIFLOW_ENV_FILE=/secure/path/provider.env` 指向部署环境生成的配置文件。修改后检查并重启：
@@ -160,7 +164,8 @@ TLS_PSEUDONYM_KEY="your-independent-random-secret"
     "model": "claude-sonnet-4-5",
     "fallback_model": null,
     "supports_image_input": true,
-    "max_turns": 20,
+    "context_window_tokens": 258000,
+    "max_turns": 30,
     "max_budget_usd": null,
     "effort": "high",
     "permission_mode": "dontAsk",
@@ -181,6 +186,8 @@ AIFLOW_DATA_DIR
 AIFLOW_SKILLS_DIR
 AIFLOW_CLAUDE_MODEL
 AIFLOW_CLAUDE_FALLBACK_MODEL
+AIFLOW_CLAUDE_CONTEXT_WINDOW_TOKENS
+AIFLOW_CLAUDE_MAX_TURNS
 AIFLOW_CLAUDE_SUPPORTS_IMAGE_INPUT
 AIFLOW_MAX_SESSIONS
 AIFLOW_MAX_CONCURRENT_TASKS
@@ -188,6 +195,8 @@ AIFLOW_MAX_QUEUED_TASKS
 ```
 
 Claude Code SDK 会继承服务进程环境。当前服务显式用 `AIFLOW_CLAUDE_MODEL`/`claude.model` 固定模型，并保留 `ANTHROPIC_BASE_URL` 和认证变量给 Claude Code CLI 使用。
+
+`context_window_tokens` 通过 Claude Code CLI 的 `CLAUDE_CODE_MAX_CONTEXT_TOKENS` 环境变量生效；这是自动压缩阈值/有效上下文上限，不是 Anthropic SDK 的任意 `context_window` 参数。对于支持更大上下文的第三方模型，可以把它提高到提供方允许的值；本项目默认使用 258K。`max_turns` 同时传给 Claude Agent SDK 的 `ClaudeAgentOptions.max_turns`。
 
 `supports_image_input=false` 时，服务不会把图片内容发送给模型，并通过 `PreToolUse` 硬性拒绝 Agent 对图片文件调用 `Read`。Agent 仍会收到文件名、相对路径、MIME 和大小，可直接在 UIFlow2 代码中引用图片路径，并将图片加入 `.aiflow/deploy.json`；它不得解码、OCR、描述或猜测图片内容。文字代码、UIFlow2 文档以及其他非图片文件仍可正常读取。
 
@@ -217,18 +226,19 @@ Claude Code SDK 会继承服务进程环境。当前服务显式用 `AIFLOW_CLAU
 
 ## 设备目标
 
-客户端初始化必须同时提交平台 `deviceId` 和上传标识 `clientId`，不需要提交 MAC，也不需要服务端维护 MAC 映射。网页配对后直接发送：
+客户端初始化必须同时提交平台 `deviceId` 和上传标识 `clientId`，MAC 可选。网页配对后直接发送：
 
 ```json
 {
   "device_id": "由客户端配对流程取得的平台设备 ID",
   "client_id": "由客户端生成或取得的上传 Client ID",
+  "mac_address": "可选，设备 MAC 地址",
   "product": "CoreS3",
   "firmware_version": "2.x"
 }
 ```
 
-同一 `device_id` 再次调用 `POST /api/v3/contexts` 会返回原 `context_id`、项目和会话历史，更新保存的 `client_id`，且 `created=false`。新令牌会使旧令牌失效，前端应立即替换 `sessionStorage` 中的值。
+同一 `device_id` 再次调用 `POST /api/v3/contexts` 会返回原 `context_id`、项目和会话历史，更新本次提供的 `client_id`/MAC；省略 MAC 不会清除历史 MAC，且 `created=false`。输入同时兼容 `mac`、`macAddress`、`mac_address`。新令牌会使旧令牌失效，前端应立即替换 `sessionStorage` 中的值。
 
 服务端或 Agent 发起代码推送时使用 `deviceId` 路径参数；上传资源文件时同时发送 `deviceId` 和 `clientId`。两个值都只从初始化上下文机械读取，不放入 Agent 提示词，也不会用内部 `context_id` 兜底。
 

@@ -136,7 +136,7 @@ response_timestamp
 
 以下内容不会原样发送：
 
-- SDK 实际提供的 thinking 会经统一脱敏后进入浏览器、公开 API 和 SQLite `task_events`；这类内容属于高敏感数据，任务令牌、history/SSE 响应、TLS Topic 和本地数据库都必须采用最小权限、HTTPS、访问审计和有限保留期。
+- SDK 实际提供的 thinking 会经统一脱敏后进入浏览器、公开 API 和 SQLite `task_events`；这类内容属于高敏感数据，任务令牌、history/SSE 响应、TLS Topic 和本地数据库都必须采用最小权限、HTTPS、访问审计和有限保留期。TLS envelope 为外部分析额外保留原始 `device_id`、`client_id` 和可选 `mac_address`，但公开事件 payload 继续脱敏，Topic 必须限制读取权限。
 - 会话消息 API 保留 SDK transcript 中的完整 thinking 正文，但继续脱敏 provider signature、凭据、设备标识和内部路径。
 - 绝对工作区路径、`deviceId`、`clientId`、环境中的 API key/token/password/secret、签名字段。
 - 除公开 thinking 外，超过单事件上限的长文本和过深/过大的结构；thinking 保留完整脱敏正文以便最终块校准流式内容。

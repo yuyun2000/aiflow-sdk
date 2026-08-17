@@ -46,6 +46,7 @@ async function connectDevice(pairedDevice) {
       device: {
         device_id: pairedDevice.deviceId,
         client_id: pairedDevice.clientId,
+        ...(pairedDevice.mac ? { mac_address: pairedDevice.mac } : {}),
         product: pairedDevice.product ?? null,
         firmware_version: pairedDevice.firmwareVersion ?? null,
         capabilities: pairedDevice.capabilities ?? {},
@@ -60,7 +61,7 @@ async function connectDevice(pairedDevice) {
 ```
 
 - 首次连接返回 `201`、`created=true`。
-- 相同 `deviceId` 重连返回 `200`、`created=false`，复用原工作区和 Claude 历史，并以本次传入值更新 `clientId`。
+- 相同 `deviceId` 重连返回 `200`、`created=false`，复用原工作区和 Claude 历史，并以本次传入值更新 `clientId`/MAC；旧客户端省略 MAC 时保留已有值。MAC 输入也可使用 `mac` 或 `macAddress` 别名。
 - 重连会轮换令牌，旧标签页令牌立即失效；始终用响应中的新令牌覆盖缓存。
 - 响应自带 `system_status`，前端可立即展示当前会话和队列容量。
 

@@ -12,6 +12,8 @@ AUTH_ENV = (
     "AIFLOW_CLIENT_AUTH_ENABLED",
     "AIFLOW_CLIENT_KEYS_FILE",
     "AIFLOW_CLAUDE_SUPPORTS_IMAGE_INPUT",
+    "AIFLOW_CLAUDE_CONTEXT_WINDOW_TOKENS",
+    "AIFLOW_CLAUDE_MAX_TURNS",
 )
 TLS_ENV = (
     "TLS_LOG_ENABLED",
@@ -127,6 +129,36 @@ def test_model_image_input_capability_defaults_true_and_supports_env_override(tm
     settings = load_settings(config)
     assert settings.claude_supports_image_input is False
     assert settings.public_dict([])["supports_image_input"] is False
+
+
+def test_claude_context_and_turn_defaults_and_env_overrides(tmp_path, monkeypatch):
+    clear_auth_env(monkeypatch)
+    config = tmp_path / "server.json"
+    config.write_text(json.dumps({"claude": {}}), encoding="utf-8")
+
+    defaults = load_settings(config)
+    assert defaults.claude_context_window_tokens == 258000
+    assert defaults.claude_max_turns == 30
+    assert defaults.public_dict([])["context_window_tokens"] == 258000
+    assert defaults.public_dict([])["max_turns"] == 30
+
+    monkeypatch.setenv("AIFLOW_CLAUDE_CONTEXT_WINDOW_TOKENS", "300000")
+    monkeypatch.setenv("AIFLOW_CLAUDE_MAX_TURNS", "40")
+    overridden = load_settings(config)
+    assert overridden.claude_context_window_tokens == 300000
+    assert overridden.claude_max_turns == 40
+
+
+def test_claude_context_and_turn_reject_non_positive_values(tmp_path, monkeypatch):
+    clear_auth_env(monkeypatch)
+    config = tmp_path / "server.json"
+    config.write_text(json.dumps({"claude": {"context_window_tokens": 0}}), encoding="utf-8")
+    with pytest.raises(ConfigError, match="claude.context_window_tokens"):
+        load_settings(config)
+
+    config.write_text(json.dumps({"claude": {"max_turns": 0}}), encoding="utf-8")
+    with pytest.raises(ConfigError, match="claude.max_turns"):
+        load_settings(config)
 
 
 def test_model_image_input_capability_rejects_invalid_value(tmp_path, monkeypatch):

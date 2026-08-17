@@ -126,6 +126,31 @@ def _utf8_chunks(value: str, max_bytes: int) -> list[str]:
     return chunks
 
 
+def _device_binding(db: sqlite3.Connection, context_id: str) -> dict[str, Any]:
+    """Read the raw device identifiers once for every physical TLS record."""
+    row = db.execute(
+        "SELECT device_id, device_json FROM contexts WHERE context_id=?",
+        (context_id,),
+    ).fetchone()
+    if not row:
+        return {"device_id": None, "client_id": None, "mac_address": None}
+    try:
+        device = json.loads(row["device_json"])
+    except (TypeError, ValueError):
+        device = {}
+    if not isinstance(device, dict):
+        device = {}
+    return {
+        "device_id": row["device_id"],
+        "client_id": device.get("client_id") or device.get("push_client_id"),
+        "mac_address": (
+            device.get("mac_address")
+            or device.get("macAddress")
+            or device.get("mac")
+        ),
+    }
+
+
 def enqueue_trace_event(
     db: sqlite3.Connection,
     settings: TlsLoggingSettings,
@@ -151,6 +176,7 @@ def enqueue_trace_event(
     chunks = _utf8_chunks(payload_json, settings.max_payload_bytes)
     event_id = f"{turn_id}:{event_sequence:08d}"
     event_time_ms = _unix_milliseconds(created_at)
+    device_binding = _device_binding(db, context_id)
     for chunk_index, chunk in enumerate(chunks):
         record_id = f"{event_id}:{chunk_index:04d}"
         contents = {
@@ -159,6 +185,7 @@ def enqueue_trace_event(
             "record_id": record_id,
             "event_id": event_id,
             "project_id": _project_id(settings, context_id),
+            **device_binding,
             "conversation_id": conversation_id,
             "turn_id": turn_id,
             "turn_index": turn_index,

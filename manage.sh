@@ -305,6 +305,8 @@ auth_sources = [
 print(f"Listen: {settings.host}:{settings.port}")
 print(f"Model ID: {settings.claude_model or 'claude-code-default'}")
 print(f"Model image input: {'supported' if settings.claude_supports_image_input else 'disabled'}")
+print(f"Context window limit: {settings.claude_context_window_tokens} tokens")
+print(f"Agent max turns: {settings.claude_max_turns}")
 print(f"Provider URL: {base_url}")
 print(f"Authentication: {', '.join(auth_sources) if auth_sources else 'not configured'}")
 print("Public entrypoint: anonymous web BFF (aiflow_server.gateway)")

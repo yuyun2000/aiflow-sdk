@@ -12,7 +12,7 @@
 X-AIFlow-Context-Token: ctx_secret_...
 ```
 
-服务没有账号登录。初始化时客户端必须提交 `deviceId` 和 `clientId`。`deviceId` 是前后端统一项目主键，`clientId` 是资源上传所需的客户端标识；能力令牌用于隔离该设备项目的文件、任务和 Claude 历史。SQLite 只保存令牌 SHA-256。
+服务没有账号登录。初始化时客户端必须提交 `deviceId` 和 `clientId`，可选提交 MAC。`deviceId` 是前后端统一项目主键，`clientId` 是资源上传所需的客户端标识；能力令牌用于隔离该设备项目的文件、任务和 Claude 历史。SQLite 只保存令牌 SHA-256。
 
 默认公网入口是 `aiflow_server.gateway:app`。浏览器无需且不能持有 HMAC 密钥：网关签发匿名 HttpOnly 会话，检查修改请求的 Origin，按会话/IP 限流，再用进程内密钥通过 `AIFLOW-HMAC-SHA256-V1` 调用不可公网寻址的核心应用。`GET /api/v3/capabilities` 返回 `client_auth.mode=server_bff`。
 
@@ -38,10 +38,12 @@ X-AIFlow-Context-Token: ctx_secret_...
 ANTHROPIC_BASE_URL="https://your-provider.example.com"
 ANTHROPIC_AUTH_TOKEN="your-bearer-token"
 AIFLOW_CLAUDE_MODEL="your-provider-model-id"
+AIFLOW_CLAUDE_CONTEXT_WINDOW_TOKENS="258000"
+AIFLOW_CLAUDE_MAX_TURNS="30"
 AIFLOW_CLAUDE_SUPPORTS_IMAGE_INPUT="false"
 ```
 
-使用 `x-api-key` 的提供方将 `ANTHROPIC_AUTH_TOKEN` 替换为 `ANTHROPIC_API_KEY`。两种认证变量不要同时设置。`AIFLOW_CLAUDE_MODEL` 优先于 `server_config.json -> claude.model`；DeepSeek 等不支持图片输入的模型应设置 `AIFLOW_CLAUDE_SUPPORTS_IMAGE_INPUT=false`，该变量优先于 `server_config.json -> claude.supports_image_input`。密钥不属于 V3 HTTP 请求，网页客户端也不能读取或修改它。
+使用 `x-api-key` 的提供方将 `ANTHROPIC_AUTH_TOKEN` 替换为 `ANTHROPIC_API_KEY`。两种认证变量不要同时设置。`AIFLOW_CLAUDE_MODEL` 优先于 `server_config.json -> claude.model`；`AIFLOW_CLAUDE_CONTEXT_WINDOW_TOKENS` 和 `AIFLOW_CLAUDE_MAX_TURNS` 分别覆盖 `claude.context_window_tokens`（默认 258K）和 `claude.max_turns`（默认 30）。上下文值通过 Claude Code 的 `CLAUDE_CODE_MAX_CONTEXT_TOKENS` 环境变量控制自动压缩上限，实际可用值仍受第三方模型限制。DeepSeek 等不支持图片输入的模型应设置 `AIFLOW_CLAUDE_SUPPORTS_IMAGE_INPUT=false`，该变量优先于 `server_config.json -> claude.supports_image_input`。密钥不属于 V3 HTTP 请求，网页客户端也不能读取或修改它。
 
 仓库根目录的 `manage.sh` 默认加载 `.env.local`，也可由 `AIFLOW_ENV_FILE` 指定其他文件。使用 `./manage.sh config` 做脱敏检查。第三方端必须兼容 Anthropic Messages API，纯 OpenAI Chat Completions 代理不能直接作为此 URL。
 
@@ -57,7 +59,7 @@ AIFLOW_CLAUDE_SUPPORTS_IMAGE_INPUT="false"
 
 ### `GET /api/v3/capabilities`
 
-返回模型、Skill、上传限制、多模态限制和队列配置，不返回令牌或设备信息。
+返回模型、Skill、上传限制、多模态限制、上下文上限、最大 Agent 轮次和队列配置，不返回令牌或设备信息。`context_window_tokens` 是传给 Claude Code 自动压缩的 token 上限，`max_turns` 是单次 Agent 任务的最大对话轮次。
 
 启用火山引擎 SAUC 后还会返回脱敏状态：
 
@@ -120,6 +122,7 @@ AIFLOW_CLAUDE_SUPPORTS_IMAGE_INPUT="false"
   "device": {
     "device_id": "paired-platform-device-id",
     "client_id": "client-generated-upload-id",
+    "mac_address": "AA:BB:CC:DD:EE:FF",
     "product": "CoreS3",
     "firmware_version": "2.3.1",
     "capabilities": {"display": "320x240", "touch": true}
@@ -127,7 +130,7 @@ AIFLOW_CLAUDE_SUPPORTS_IMAGE_INPUT="false"
 }
 ```
 
-`device_id` 和 `client_id` 都必填，也接受客户端常用的 `deviceId`、`clientId` 输入别名。旧字段 `push_client_id` 暂时作为 `client_id` 的兼容输入，但响应和持久化统一使用 `client_id`。服务端不需要客户端提交 MAC，也不维护 MAC 映射。
+`device_id` 和 `client_id` 都必填，也接受客户端常用的 `deviceId`、`clientId` 输入别名。`mac_address` 是可选字段，同时接受 `macAddress` 和 `mac` 输入别名，响应和持久化统一使用 `mac_address`。旧字段 `push_client_id` 暂时作为 `client_id` 的兼容输入，但响应和持久化统一使用 `client_id`。不传 MAC 的旧客户端请求仍然有效；已有设备重连时省略 MAC 会保留已绑定的 MAC。
 
 从 API `3.2` 开始，旧项目在再次 Coding 或部署前应使用同一 `deviceId` 携带真实 `clientId` 重连。服务端不会为旧数据生成或猜测 Client ID。
 
@@ -143,6 +146,7 @@ AIFLOW_CLAUDE_SUPPORTS_IMAGE_INPUT="false"
   "context_id": "ctx_...",
   "device_id": "paired-platform-device-id",
   "client_id": "client-generated-upload-id",
+  "mac_address": "AA:BB:CC:DD:EE:FF",
   "access_token": "ctx_secret_...",
   "conversation_id": "conv_...",
   "label": "browser-tab",
@@ -160,11 +164,11 @@ AIFLOW_CLAUDE_SUPPORTS_IMAGE_INPUT="false"
 
 ### `GET /api/v3/project`
 
-一次返回当前 `device_id`、`client_id`、项目文件、当前对话、Claude session 摘要和活跃任务，供前端恢复项目页面。
+一次返回当前 `device_id`、`client_id`、可选 `mac_address`、项目文件、当前对话、Claude session 摘要和活跃任务，供前端恢复项目页面。
 
 ### `PATCH /api/v3/context/device`
 
-更新产品、固件或能力信息。`device_id` 和 `client_id` 不允许通过 PATCH 修改；切换设备或更新 Client ID 应重新调用连接接口。
+更新产品、固件、能力或可选 MAC 信息。`device_id` 和 `client_id` 不允许通过 PATCH 修改；切换设备或更新 Client ID 应重新调用连接接口。
 
 ### `DELETE /api/v3/context?confirm=true`
 
@@ -399,9 +403,9 @@ Agent 的所有公开文本块使用用户本人最近一条可识别的自然�
 
 `assistant_text_delta` 和流式 `agent_reasoning` 都是实时增量并带 `finalized=false`，正文分别位于 `text` 和 `thinking`；最终 `assistant_message` 和 `agent_reasoning` 带 `finalized=true` 并携带 SDK 最终完整块。服务端从原始 `message_start.message.id` 与最终 `AssistantMessage.message_id` 生成统一 `response_id`，并保留内容块 `block_index`。客户端必须按内容类型分别以 `response_id + block_index` 为键追加 delta，再用最终块覆盖校准；最终块到达后忽略同键晚到 delta，不能把完整块和增量各渲染一遍。流中断时，thinking 的 `agent_partial_capture` 带 `partial=true`、`finalized=false` 和已收到的累计 `thinking`，同样用于覆盖校准。SDK 外层 `message_uuid` 仅用于诊断，不能作为增量与最终消息的关联键。
 
-`tool_started` 和 `tool_finished` 通过 `tool_use_id` 关联，分别携带已脱敏的真实完整 `input` 与 `content/result`。逐字符 `input_json_delta`、签名碎片和高频 `thinking_tokens` 不会单独持久化或下发，也不会转换成“正在组织参数”等推测状态。SDK 实际提供的每个 `thinking_delta` 会作为 `agent_reasoning` 实时持久化和下发，不再节流为空活动标记。事件中的绝对工作区路径、`deviceId`、`clientId`、凭据和签名会统一脱敏；thinking 正文完整保留，其他单个长文本仍可能截断。
+`tool_started` 和 `tool_finished` 通过 `tool_use_id` 关联，分别携带已脱敏的真实完整 `input` 与 `content/result`。逐字符 `input_json_delta`、签名碎片和高频 `thinking_tokens` 不会单独持久化或下发，也不会转换成“正在组织参数”等推测状态。SDK 实际提供的每个 `thinking_delta` 会作为 `agent_reasoning` 实时持久化和下发，不再节流为空活动标记。事件 payload 中的绝对工作区路径、`deviceId`、`clientId`、MAC、凭据和签名会统一脱敏；thinking 正文完整保留，其他单个长文本仍可能截断。
 
-启用 TLS 对话审计时，公开 API 中的 thinking 与 TLS 最终审计记录来自同一 SDK 内容，但用途和粒度不同：SSE/`task_events` 保留每个脱敏 delta 供实时与断线恢复；TLS 不上传这些 delta，只在收到最终 `AssistantMessage` 后把完整 thinking 块写入 outbox，流中断时才上传一次 `agent_partial_capture`。逻辑事件在上传前去重，TLS 至少一次投递造成的物理重传由消费端按 `record_id` 去重。具体覆盖矩阵、schema 和权限边界见 [CONVERSATION_LOGGING.md](CONVERSATION_LOGGING.md)。
+启用 TLS 对话审计时，公开 API 中的 thinking 与 TLS 最终审计记录来自同一 SDK 内容，但用途和粒度不同：SSE/`task_events` 保留每个脱敏 delta 供实时与断线恢复；TLS 不上传这些 delta，只在收到最终 `AssistantMessage` 后把完整 thinking 块写入 outbox，流中断时才上传一次 `agent_partial_capture`。每条 TLS 物理记录的 envelope 还绑定当前项目的原始 `device_id`、`client_id` 和可选 `mac_address`，便于外部分析；payload 仍按公开规则脱敏。逻辑事件在上传前去重，TLS 至少一次投递造成的物理重传由消费端按 `record_id` 去重。包含原始标识的 Topic 必须使用最小权限和访问审计，具体覆盖矩阵、schema 和权限边界见 [CONVERSATION_LOGGING.md](CONVERSATION_LOGGING.md)。
 
 ### `GET /api/v3/tasks/{task_id}/events/history?after=N&limit=200`
 

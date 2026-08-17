@@ -79,6 +79,47 @@ def test_legacy_context_schema_migrates_to_device_id_reconnect(tmp_path):
     assert storage.get_context_by_token("new-token")["device"]["client_id"] == "client-legacy"
 
 
+def test_legacy_device_json_mac_alias_is_normalized(tmp_path):
+    database = tmp_path / "aiflow.sqlite3"
+    connection = sqlite3.connect(database)
+    connection.execute(
+        """
+        CREATE TABLE contexts (
+            context_id TEXT PRIMARY KEY,
+            token_hash TEXT NOT NULL UNIQUE,
+            conversation_id TEXT NOT NULL,
+            session_id TEXT,
+            label TEXT NOT NULL,
+            device_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO contexts(
+            context_id, token_hash, conversation_id, label, device_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "ctx_legacy_mac",
+            hash_token("legacy-mac-token"),
+            "conv_legacy_mac",
+            "legacy mac project",
+            json.dumps({"device_id": "device-legacy-mac", "client_id": "client-legacy", "mac": "AA:BB:CC:DD:EE:FF"}),
+            "2026-07-30T00:00:00+00:00",
+            "2026-07-30T00:00:00+00:00",
+        ),
+    )
+    connection.commit()
+    connection.close()
+
+    context = Storage(database).get_context_by_device_id("device-legacy-mac")
+    assert context["device"]["mac_address"] == "AA:BB:CC:DD:EE:FF"
+    assert "mac" not in context["device"]
+
+
 def test_restart_marks_interrupted_task_with_terminal_event(tmp_path):
     database = tmp_path / "aiflow.sqlite3"
     storage = Storage(database)

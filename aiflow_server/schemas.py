@@ -20,11 +20,17 @@ class DeviceInfo(StrictModel):
         max_length=256,
         validation_alias=AliasChoices("client_id", "clientId", "push_client_id"),
     )
+    mac_address: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=64,
+        validation_alias=AliasChoices("mac_address", "macAddress", "mac"),
+    )
     product: str | None = Field(default=None, max_length=200)
     firmware_version: str | None = Field(default=None, max_length=100)
     capabilities: dict[str, Any] = Field(default_factory=dict)
 
-    @field_validator("device_id", "client_id")
+    @field_validator("device_id", "client_id", "mac_address")
     @classmethod
     def validate_identifier(cls, value: str | None) -> str | None:
         if value is None:
@@ -49,6 +55,12 @@ class CreateContextRequest(StrictModel):
 
 
 class UpdateDeviceRequest(StrictModel):
+    mac_address: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=64,
+        validation_alias=AliasChoices("mac_address", "macAddress", "mac"),
+    )
     product: str | None = Field(default=None, max_length=200)
     firmware_version: str | None = Field(default=None, max_length=100)
     capabilities: dict[str, Any] | None = None
@@ -69,6 +81,7 @@ class ContextResponse(StrictModel):
     context_id: str
     device_id: str
     client_id: str
+    mac_address: str | None = None
     access_token: str
     conversation_id: str
     label: str
@@ -83,6 +96,7 @@ class ContextInfoResponse(StrictModel):
     context_id: str
     device_id: str
     client_id: str | None
+    mac_address: str | None = None
     conversation_id: str
     label: str
     device: DeviceInfo

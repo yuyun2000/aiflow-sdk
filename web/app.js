@@ -129,7 +129,7 @@ const STAGE_LABELS = {
 const ui = Object.fromEntries(
   [
     "health-dot", "health-label", "model-label", "capacity-label",
-    "device-form", "device-id", "client-id", "product", "connect-button", "connect-error",
+    "device-form", "device-id", "client-id", "mac-address", "product", "connect-button", "connect-error",
     "connection-state", "workspace", "coding-form", "prompt", "image-input",
     "audio-input", "attachment-summary", "submit-button", "cancel-button",
     "coding-error", "task-state", "task-stage",
@@ -340,7 +340,13 @@ function updateCapacity(capacity) {
   ui["capacity-label"].textContent = `task: ${tasks.running} 运行 / ${tasks.queued} 排队 / ${tasks.available} 可用`;
 }
 
-async function connectDevice(deviceId, clientId, product) {
+async function connectDevice(deviceId, clientId, macAddress, product) {
+  const device = {
+    device_id: deviceId,
+    client_id: clientId,
+    product: product || null,
+  };
+  if (macAddress) device.mac_address = macAddress;
   const result = await api(
     "/api/v3/contexts",
     {
@@ -348,11 +354,7 @@ async function connectDevice(deviceId, clientId, product) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         label: "AIFlow local web client",
-        device: {
-          device_id: deviceId,
-          client_id: clientId,
-          product: product || null,
-        },
+        device,
       }),
     },
     false
@@ -360,6 +362,7 @@ async function connectDevice(deviceId, clientId, product) {
   state.deviceId = result.device_id;
   state.clientId = result.client_id;
   state.token = result.access_token;
+  ui["mac-address"].value = result.mac_address || result.device?.mac_address || "";
   sessionStorage.setItem(ACTIVE_DEVICE_KEY, state.deviceId);
   sessionStorage.setItem(tokenKey(state.deviceId), state.token);
   setConnected(true);
@@ -398,6 +401,7 @@ async function refreshProject() {
   if (!project.client_id) throw new Error("设备项目缺少 clientId，请重新连接");
   state.clientId = project.client_id;
   ui["client-id"].value = state.clientId;
+  ui["mac-address"].value = project.mac_address || "";
   renderFiles(project.files || []);
   ui["active-device"].textContent = compactId(project.device_id);
   ui["active-client"].textContent = compactId(project.client_id);
@@ -1175,6 +1179,7 @@ ui["device-form"].addEventListener("submit", async (event) => {
     await connectDevice(
       ui["device-id"].value.trim(),
       ui["client-id"].value.trim(),
+      ui["mac-address"].value.trim(),
       ui.product.value.trim()
     );
   } catch (error) {

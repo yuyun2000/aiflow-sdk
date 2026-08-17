@@ -158,6 +158,7 @@ def test_built_in_web_client_is_served(service):
     assert page.headers["content-type"].startswith("text/html")
     assert 'id="device-id"' in page.text
     assert 'id="client-id"' in page.text
+    assert 'id="mac-address"' in page.text
     assert 'id="runtime-log"' in page.text
     assert 'id="agent-log"' in page.text
     assert 'id="raw-stream"' in page.text
@@ -472,6 +473,14 @@ def test_device_update_plan_and_no_global_listing(service):
     assert update.json()["device"]["device_id"] == "device-ee"
     assert update.json()["device"]["client_id"] == "client-ee"
     assert update.json()["device"]["firmware_version"] == "2.3.1"
+    mac_update = client.patch(
+        "/api/v3/context/device",
+        headers=headers,
+        json={"mac": "aa:bb:cc:dd:ee:ff"},
+    )
+    assert mac_update.status_code == 200, mac_update.text
+    assert mac_update.json()["mac_address"] == "aa:bb:cc:dd:ee:ff"
+    assert mac_update.json()["device"]["mac_address"] == "aa:bb:cc:dd:ee:ff"
     assert client.patch(
         "/api/v3/context/device",
         headers=headers,
@@ -509,6 +518,7 @@ def test_device_id_reconnect_and_session_capacity(tmp_path):
                 "device": {
                     "device_id": "device-capacity-a",
                     "client_id": "client-capacity-a-new",
+                    "macAddress": "AA:BB:CC:DD:EE:01",
                     "product": "CoreS3",
                 },
             },
@@ -518,9 +528,23 @@ def test_device_id_reconnect_and_session_capacity(tmp_path):
         assert reconnected["created"] is False
         assert reconnected["context_id"] == first["context_id"]
         assert reconnected["client_id"] == "client-capacity-a-new"
+        assert reconnected["mac_address"] == "AA:BB:CC:DD:EE:01"
+        assert reconnected["device"]["mac_address"] == "AA:BB:CC:DD:EE:01"
         assert client.get("/api/v3/context", headers=first_headers).status_code == 401
         new_headers = {TOKEN_HEADER: reconnected["access_token"]}
         assert client.get("/api/v3/context", headers=new_headers).status_code == 200
+
+        legacy_reconnect = client.post(
+            "/api/v3/contexts",
+            json={
+                "device": {
+                    "device_id": "device-capacity-a",
+                    "client_id": "client-capacity-a-legacy-reconnect",
+                },
+            },
+        )
+        assert legacy_reconnect.status_code == 200, legacy_reconnect.text
+        assert legacy_reconnect.json()["mac_address"] == "AA:BB:CC:DD:EE:01"
 
         full = client.post(
             "/api/v3/contexts",
@@ -556,6 +580,7 @@ def test_context_creation_requires_client_id_and_accepts_camel_case_aliases(serv
 
     connect_schema = client.get("/openapi.json").json()["components"]["schemas"]["ConnectDeviceInfo"]
     assert "client_id" in connect_schema["required"]
+    assert "mac_address" not in connect_schema["required"]
 
     missing = client.post(
         "/api/v3/contexts",
@@ -569,6 +594,7 @@ def test_context_creation_requires_client_id_and_accepts_camel_case_aliases(serv
             "device": {
                 "deviceId": "device-camel-case",
                 "clientId": "client-camel-case",
+                "macAddress": "11:22:33:44:55:66",
             }
         },
     )
@@ -576,7 +602,9 @@ def test_context_creation_requires_client_id_and_accepts_camel_case_aliases(serv
     payload = created.json()
     assert payload["device_id"] == "device-camel-case"
     assert payload["client_id"] == "client-camel-case"
+    assert payload["mac_address"] == "11:22:33:44:55:66"
     assert payload["device"]["client_id"] == "client-camel-case"
+    assert payload["device"]["mac_address"] == "11:22:33:44:55:66"
 
     legacy_alias = client.post(
         "/api/v3/contexts",
@@ -584,11 +612,13 @@ def test_context_creation_requires_client_id_and_accepts_camel_case_aliases(serv
             "device": {
                 "device_id": "device-legacy-alias",
                 "push_client_id": "client-legacy-alias",
+                "mac": "66:55:44:33:22:11",
             }
         },
     )
     assert legacy_alias.status_code == 201, legacy_alias.text
     assert legacy_alias.json()["client_id"] == "client-legacy-alias"
+    assert legacy_alias.json()["mac_address"] == "66:55:44:33:22:11"
     assert "push_client_id" not in legacy_alias.json()["device"]
 
 

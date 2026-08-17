@@ -21,6 +21,7 @@ from aiflow_server.agent import (
     _agent_tools,
     _assistant_block_event,
     _assistant_block_tls_metadata,
+    _agent_env,
     _block_image_read,
     _build_prompt,
     _model_capability_hooks,
@@ -70,6 +71,10 @@ def test_system_prompt_keeps_domain_and_makes_skill_order_advisory():
     assert "Never begin a tool-using turn with a tool call" in SYSTEM_APPEND
     assert "fact or hypothesis being checked" in SYSTEM_APPEND
     assert "Never emit placeholders" in SYSTEM_APPEND
+    assert "configured turn limit" in SYSTEM_APPEND
+    assert "do not exceed it with optional investigation" in SYSTEM_APPEND
+    assert "Avoid repeating tool calls" in SYSTEM_APPEND
+    assert "finish the smallest complete deliverable" in SYSTEM_APPEND
 
 
 def test_system_prompt_uses_user_language_instead_of_tool_context_language():
@@ -107,6 +112,21 @@ def test_runtime_tool_policy_enables_skill_and_official_mcp_tools():
 
     _, mcp_disabled = _agent_tools(("Read",), skills, False)
     assert all(tool not in mcp_disabled for tool in M5STACK_MCP_TOOLS)
+
+
+def test_agent_env_sets_context_limit_and_keeps_device_target_scoped(tmp_path):
+    settings = load_settings()
+    device = {"device_id": "private-device-id", "client_id": "private-client-id"}
+
+    regular_env = _agent_env(settings, tmp_path, device, False)
+    assert regular_env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "258000"
+    assert "AIFLOW_DEVICE_ID" not in regular_env
+    assert "AIFLOW_CLIENT_ID" not in regular_env
+
+    deploy_env = _agent_env(settings, tmp_path, device, True)
+    assert deploy_env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "258000"
+    assert deploy_env["AIFLOW_DEVICE_ID"] == "private-device-id"
+    assert deploy_env["AIFLOW_CLIENT_ID"] == "private-client-id"
 
 
 def test_prompt_keeps_device_id_private_and_separates_deployment_modes():
@@ -857,6 +877,17 @@ def test_sanitizer_keeps_usage_counts_but_redacts_credential_tokens(tmp_path):
     assert sanitized["accessKey"] == "<redacted>"
     assert sanitized["stream_token"] == "<redacted>"
     assert sanitized["token"] == "<redacted>"
+
+
+def test_sanitizer_redacts_mac_from_public_payload(tmp_path):
+    sanitized = _sanitize_tls_event(
+        {"mac_address": "AA:BB:CC:DD:EE:FF", "message": "AA:BB:CC:DD:EE:FF"},
+        tmp_path,
+        ["AA:BB:CC:DD:EE:FF"],
+    )
+
+    assert sanitized["mac_address"] == "<redacted>"
+    assert sanitized["message"] == "<redacted>"
 
 
 def test_block_tls_metadata_does_not_repeat_message_summary_fields():

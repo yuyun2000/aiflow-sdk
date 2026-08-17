@@ -46,6 +46,7 @@ def create_storage(tmp_path, settings: TlsLoggingSettings) -> Storage:
         {
             "device_id": "device-private-fixture",
             "client_id": "client-private-fixture",
+            "mac_address": "aa:bb:cc:dd:ee:ff",
             "product": "CoreS3",
         },
         10,
@@ -119,14 +120,45 @@ def test_trace_records_capture_input_events_and_multiturn_identity(tmp_path):
     assert records[0]["turn_index"] == 1
     assert records[2]["turn_index"] == 2
     assert records[0]["project_id"] == records[2]["project_id"]
+    assert all(record["device_id"] == "device-private-fixture" for record in records)
+    assert all(record["client_id"] == "client-private-fixture" for record in records)
+    assert all(record["mac_address"] == "aa:bb:cc:dd:ee:ff" for record in records)
     assert "ctx_private_identifier" not in json.dumps(records, ensure_ascii=False)
-    assert "device-private-fixture" not in json.dumps(records, ensure_ascii=False)
+    payload_text = json.dumps([json.loads(record["payload"]) for record in records], ensure_ascii=False)
+    assert "device-private-fixture" not in payload_text
+    assert "client-private-fixture" not in payload_text
+    assert "aa:bb:cc:dd:ee:ff" not in payload_text
 
     first_payload = json.loads(records[0]["payload"])
     assert first_payload["prompt"] == "画一个温度仪表盘"
     assert first_payload["attachments"][0]["name"] == "参考图.png"
     tool_payload = json.loads(records[1]["payload"])
     assert tool_payload == {"tool": "Write", "input": {"file_path": "main.py"}}
+
+
+def test_legacy_context_without_mac_still_uploads_nullable_binding(tmp_path):
+    settings = telemetry_settings()
+    storage = Storage(tmp_path / "aiflow.sqlite3", tls_logging=settings)
+    storage.connect_context(
+        "ctx_legacy_identifier",
+        "ctx_secret_fixture",
+        "conv_legacy",
+        "fixture",
+        {"device_id": "device-legacy", "client_id": "client-legacy"},
+        10,
+    )
+    storage.create_task(
+        "task_legacy",
+        "ctx_legacy_identifier",
+        "stream_legacy",
+        "coding",
+        {"prompt": "legacy", "attachments": []},
+    )
+
+    record = decoded_contents(read_outbox(storage.database_path))[0]
+    assert record["device_id"] == "device-legacy"
+    assert record["client_id"] == "client-legacy"
+    assert record["mac_address"] is None
 
 
 def test_turn_index_restarts_after_conversation_reset(tmp_path):

@@ -8,7 +8,7 @@ AIFlow 把每个 Coding 或 direct-run 任务定义为一轮对话（turn），�
 
 这里的“完整 thinking”有严格边界：模型或提供方只有把思考作为 `ThinkingBlock` 或 `thinking_delta` 交给 Claude Agent SDK，AIFlow 才能记录。提供方从未返回的内部状态无法由应用获取，不能把“日志中没有 thinking”直接判定为上传丢失。正常结束时记录最终完整 `ThinkingBlock`；流在最终块前中断时记录已接收的 partial。脱敏后的 thinking delta、最终块和 partial 同时进入公开 SSE/`task_events`，原始签名和敏感标识仍不公开。
 
-日志不是未经处理的进程转储。凭证、能力令牌、Cookie、原始 `deviceId`/`clientId`、绝对工作区路径和敏感工具参数会脱敏；thinking signature 只保存 SHA-256；附件正文不上传，只保存文件名、MIME、大小、相对路径和 SHA-256。输入/输出 token 数、费用和时长不是凭证，会完整保留。
+日志不是未经处理的进程转储。TLS envelope 为了让外部分析服务关联设备，会保留当前项目原始 `device_id`、`client_id` 和可选 `mac_address`；payload、公开 SSE、任务历史和 transcript 中仍会脱敏这些标识。凭证、能力令牌、Cookie、绝对工作区路径和敏感工具参数会脱敏；thinking signature 只保存 SHA-256；附件正文不上传，只保存文件名、MIME、大小、相对路径和 SHA-256。包含原始标识的 TLS Topic 必须配置最小读取权限并开启访问审计。输入/输出 token 数、费用和时长不是凭证，会完整保留。
 
 ## 2. 数据流与异步行为
 
@@ -105,6 +105,9 @@ Claude SDK 自己会在解析层忽略它尚不认识的 wire message。为使�
 | 字段 | 语义 | 聚合用途 |
 | --- | --- | --- |
 | `project_id` | `context_id` 经独立密钥 HMAC-SHA256 后的匿名稳定 ID | 跨 conversation 关联同一项目 |
+| `device_id` | 客户端注册时提交的原始设备项目 ID | 外部分析按设备关联；仅在 TLS envelope 顶层 |
+| `client_id` | 客户端注册时提交的原始上传 Client ID | 外部分析按上传客户端关联；仅在 TLS envelope 顶层 |
+| `mac_address` | 客户端可选提交的原始 MAC；旧客户端没有时为 `null` | 外部分析按物理设备关联；仅在 TLS envelope 顶层 |
 | `conversation_id` | 新建/重置对话时生成 | 聚合一次连续多轮会话 |
 | `turn_id` | 当前 `task_id`，每轮唯一 | 聚合一轮完整过程 |
 | `turn_index` | conversation 内从 1 开始 | 还原多轮顺序 |
@@ -121,6 +124,9 @@ Claude SDK 自己会在解析层忽略它尚不认识的 wire message。为使�
   "record_id": "task_abc:00000003:0000",
   "event_id": "task_abc:00000003",
   "project_id": "project_<hmac>",
+  "device_id": "device-raw-id",
+  "client_id": "client-raw-id",
+  "mac_address": "AA:BB:CC:DD:EE:FF",
   "conversation_id": "conv_abc",
   "turn_id": "task_abc",
   "turn_index": 2,

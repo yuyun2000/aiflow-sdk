@@ -363,10 +363,22 @@ class Storage:
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             existing = db.execute(
-                "SELECT context_id FROM contexts WHERE device_id=?", (device_id,)
+                "SELECT context_id, device_json FROM contexts WHERE device_id=?", (device_id,)
             ).fetchone()
             if existing:
                 context_id = existing["context_id"]
+                stored_device = json.loads(existing["device_json"])
+                # Keep fields unknown to an older client (notably MAC) when a
+                # reconnect only sends the legacy device/client identifiers.
+                legacy_client_id = stored_device.get("push_client_id")
+                if not stored_device.get("client_id") and legacy_client_id:
+                    stored_device["client_id"] = legacy_client_id
+                for alias in ("macAddress", "mac"):
+                    if not stored_device.get("mac_address") and stored_device.get(alias):
+                        stored_device["mac_address"] = stored_device[alias]
+                    stored_device.pop(alias, None)
+                stored_device.update({key: value for key, value in device.items() if value is not None})
+                stored_device["device_id"] = device_id
                 db.execute(
                     """
                     UPDATE contexts
@@ -376,7 +388,7 @@ class Storage:
                     (
                         hash_token(token),
                         label,
-                        json.dumps(device, ensure_ascii=False),
+                        json.dumps(stored_device, ensure_ascii=False),
                         now,
                         now,
                         context_id,
@@ -480,6 +492,10 @@ class Storage:
         legacy_client_id = data["device"].pop("push_client_id", None)
         if not data["device"].get("client_id") and legacy_client_id:
             data["device"]["client_id"] = legacy_client_id
+        for alias in ("macAddress", "mac"):
+            if not data["device"].get("mac_address") and data["device"].get(alias):
+                data["device"]["mac_address"] = data["device"][alias]
+            data["device"].pop(alias, None)
         data["device"]["device_id"] = data["device_id"]
         data.pop("token_hash", None)
         return data
