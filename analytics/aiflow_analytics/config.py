@@ -140,6 +140,8 @@ def settings_summary(settings: Settings) -> dict[str, object]:
         "tls_region": settings.tls_region,
         "tls_topic_configured": bool(settings.tls_topic_id),
         "tls_schema_version": settings.tls_schema_version,
+        "tls_page_size": settings.tls_page_size,
+        "tls_max_pages": settings.tls_max_pages,
         "sync_on_startup": settings.sync_on_startup,
         "sync_interval_seconds": settings.sync_interval_seconds,
         "auth": "disabled" if settings.auth_disabled else "bearer",
