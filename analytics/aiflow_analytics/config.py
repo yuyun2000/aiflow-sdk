@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
+import math
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -21,6 +23,61 @@ def _env_bool(name: str, default: bool) -> bool:
 def _env_int(name: str, default: int) -> int:
     raw = os.getenv(name)
     return int(raw) if raw else default
+
+
+def _env_float(name: str, default: float | None) -> float | None:
+    raw = os.getenv(name)
+    return float(raw) if raw and raw.strip() else default
+
+
+def _parse_model_pricing(value: object, source: str) -> dict[str, dict[str, float]]:
+    if not isinstance(value, dict):
+        raise ValueError(f"{source} must be an object")
+    result: dict[str, dict[str, float]] = {}
+    for model, prices in value.items():
+        if not isinstance(model, str) or not model.strip():
+            raise ValueError(f"model pricing keys in {source} must be non-empty model names")
+        if not isinstance(prices, dict):
+            raise ValueError(f"pricing for model {model!r} in {source} must be an object")
+        normalized: dict[str, float] = {}
+        for key in ("input", "output", "cache_read", "cache_creation"):
+            if key not in prices or prices[key] is None:
+                continue
+            price = prices[key]
+            if isinstance(price, bool) or not isinstance(price, (int, float)):
+                raise ValueError(f"pricing {model!r}.{key} in {source} must be a number")
+            if not math.isfinite(float(price)) or float(price) < 0:
+                raise ValueError(
+                    f"pricing {model!r}.{key} in {source} must be finite and non-negative"
+                )
+            normalized[key] = float(price)
+        result[model.strip()] = normalized
+    return result
+
+
+def _read_model_pricing_file(path: Path) -> dict[str, dict[str, float]]:
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ValueError(f"unable to read model pricing file {path}: {exc}") from exc
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"model pricing file {path} must contain valid JSON") from exc
+    return _parse_model_pricing(value, f"model pricing file {path}")
+
+
+def _env_model_pricing() -> dict[str, dict[str, float]]:
+    raw = os.getenv("AIFLOW_ANALYTICS_MODEL_PRICING_JSON", "").strip()
+    if not raw:
+        return {}
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            "AIFLOW_ANALYTICS_MODEL_PRICING_JSON must be valid JSON"
+        ) from exc
+    return _parse_model_pricing(value, "AIFLOW_ANALYTICS_MODEL_PRICING_JSON")
 
 
 def _resolve_path(value: str) -> Path:
@@ -52,6 +109,13 @@ class Settings:
     auth_disabled: bool
     api_token: str
     default_range_days: int
+    model_pricing: dict[str, dict[str, float]] = field(default_factory=dict)
+    model_pricing_file: Path | None = None
+    # Deprecated global values remain readable so existing deployments can migrate.
+    input_price_usd_per_million: float | None = None
+    output_price_usd_per_million: float | None = None
+    cache_read_price_usd_per_million: float | None = None
+    cache_creation_price_usd_per_million: float | None = None
 
     @property
     def database_path(self) -> Path:
@@ -64,6 +128,14 @@ class Settings:
     @classmethod
     def from_env(cls, env_file: Path | None = None) -> Settings:
         load_dotenv(env_file or PROJECT_ROOT / ".env", override=False)
+        pricing_file_raw = os.getenv("AIFLOW_ANALYTICS_MODEL_PRICING_FILE", "").strip()
+        pricing_file = _resolve_path(pricing_file_raw or "./model_pricing.json")
+        if pricing_file.exists():
+            model_pricing = _read_model_pricing_file(pricing_file)
+        else:
+            model_pricing = _env_model_pricing()
+            if not model_pricing and pricing_file_raw:
+                raise ValueError(f"model pricing file does not exist: {pricing_file}")
         settings = cls(
             host=os.getenv("AIFLOW_ANALYTICS_HOST", "0.0.0.0"),
             port=_env_int("AIFLOW_ANALYTICS_PORT", 5090),
@@ -94,6 +166,20 @@ class Settings:
             auth_disabled=_env_bool("AIFLOW_ANALYTICS_AUTH_DISABLED", False),
             api_token=os.getenv("AIFLOW_ANALYTICS_API_TOKEN", ""),
             default_range_days=_env_int("AIFLOW_ANALYTICS_DEFAULT_RANGE_DAYS", 7),
+            model_pricing=model_pricing,
+            model_pricing_file=pricing_file if pricing_file.exists() else None,
+            input_price_usd_per_million=_env_float(
+                "AIFLOW_ANALYTICS_INPUT_PRICE_USD_PER_MILLION", None
+            ),
+            output_price_usd_per_million=_env_float(
+                "AIFLOW_ANALYTICS_OUTPUT_PRICE_USD_PER_MILLION", None
+            ),
+            cache_read_price_usd_per_million=_env_float(
+                "AIFLOW_ANALYTICS_CACHE_READ_PRICE_USD_PER_MILLION", None
+            ),
+            cache_creation_price_usd_per_million=_env_float(
+                "AIFLOW_ANALYTICS_CACHE_CREATION_PRICE_USD_PER_MILLION", None
+            ),
         )
         settings.validate()
         return settings
@@ -123,6 +209,20 @@ class Settings:
             raise ValueError("AIFLOW_ANALYTICS_SYNC_OVERLAP_MINUTES must be positive")
         if self.default_range_days < 1:
             raise ValueError("AIFLOW_ANALYTICS_DEFAULT_RANGE_DAYS must be positive")
+        for name, value in (
+            ("AIFLOW_ANALYTICS_INPUT_PRICE_USD_PER_MILLION", self.input_price_usd_per_million),
+            ("AIFLOW_ANALYTICS_OUTPUT_PRICE_USD_PER_MILLION", self.output_price_usd_per_million),
+            (
+                "AIFLOW_ANALYTICS_CACHE_READ_PRICE_USD_PER_MILLION",
+                self.cache_read_price_usd_per_million,
+            ),
+            (
+                "AIFLOW_ANALYTICS_CACHE_CREATION_PRICE_USD_PER_MILLION",
+                self.cache_creation_price_usd_per_million,
+            ),
+        ):
+            if value is not None and (not math.isfinite(value) or value < 0):
+                raise ValueError(f"{name} must not be negative")
         if not self.auth_disabled and len(self.api_token) < 24:
             raise ValueError(
                 "AIFLOW_ANALYTICS_API_TOKEN must contain at least 24 characters "
@@ -144,5 +244,18 @@ def settings_summary(settings: Settings) -> dict[str, object]:
         "tls_max_pages": settings.tls_max_pages,
         "sync_on_startup": settings.sync_on_startup,
         "sync_interval_seconds": settings.sync_interval_seconds,
+        "pricing_models": sorted(settings.model_pricing),
+        "pricing_file": str(settings.model_pricing_file)
+        if settings.model_pricing_file
+        else None,
+        "legacy_global_pricing_configured": any(
+            value is not None
+            for value in (
+                settings.input_price_usd_per_million,
+                settings.output_price_usd_per_million,
+                settings.cache_read_price_usd_per_million,
+                settings.cache_creation_price_usd_per_million,
+            )
+        ),
         "auth": "disabled" if settings.auth_disabled else "bearer",
     }

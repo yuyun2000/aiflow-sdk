@@ -132,6 +132,17 @@ h1, h2, h3, p { margin: 0; }
 .health-stats strong { display: block; margin-top: 7px; overflow: hidden; font-size: 14px; font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
 
 .split-grid .panel { min-height: 272px; padding: 19px 20px; }
+.pricing-list { margin-top: 13px; border-top: 1px solid var(--line); }
+.pricing-model-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 31px; border-bottom: 1px solid var(--line); color: var(--ink); font-size: 10px; }
+.pricing-model-heading strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pricing-configured, .pricing-unconfigured { flex: 0 0 auto; color: var(--teal); font-size: 9px; }
+.pricing-unconfigured { color: var(--amber); }
+.pricing-row { display: grid; grid-template-columns: minmax(70px, .7fr) minmax(95px, 1fr) minmax(110px, 1.2fr); align-items: center; gap: 8px; min-height: 35px; border-bottom: 1px solid var(--line); color: var(--muted); font-size: 11px; }
+.pricing-count, .pricing-price { text-align: right; font-variant-numeric: tabular-nums; }
+.pricing-price { color: var(--ink); font-size: 10px; }
+.pricing-actual { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line-strong); color: var(--muted); font-size: 11px; }
+.pricing-actual strong { margin-left: auto; color: var(--coral); font-size: 17px; font-variant-numeric: tabular-nums; }
+.pricing-actual small { color: #89959d; font-size: 9px; white-space: nowrap; }
 .bar-list { margin-top: 14px; border-top: 1px solid var(--line); }
 .bar-row { display: grid; grid-template-columns: minmax(100px, 1.1fr) minmax(90px, 1fr) 78px; align-items: center; gap: 13px; min-height: 43px; border-bottom: 1px solid var(--line); font-size: 12px; }
 .bar-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -257,6 +268,9 @@ tbody tr:last-child td { border-bottom: 0; }
   .chart-panel, .health-panel, .quality-panel, .split-grid .panel { padding: 16px 14px; }
   .panel-heading { gap: 10px; }
   .panel-heading h2 { font-size: 15px; }
+  .pricing-row { grid-template-columns: 62px minmax(78px, 1fr) minmax(100px, 1.3fr); }
+  .pricing-actual { align-items: flex-start; flex-wrap: wrap; }
+  .pricing-actual small { flex-basis: 100%; white-space: normal; }
   .health-ring-wrap { gap: 15px; }
   .health-ring { flex-basis: 124px; width: 124px; height: 124px; }
   .health-ring::after { width: 92px; height: 92px; }

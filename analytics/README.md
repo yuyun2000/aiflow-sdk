@@ -17,7 +17,8 @@
 
 - 任务、对话、项目量，完成率、失败率、取消与不完整任务。
 - input/output/cache token、token/turn、输出输入比。
-- 总费用、单任务费用、成功任务费用、每千 token 费用。
+- 输入、输出、缓存读取/写入 token 数，以及按配置单价估算的分类费用。
+- SDK Claude 计价参考、按模型价格计算的实际总费用、单任务费用、成功任务费用、每千 token 费用。
 - Agent/API/排队/服务总耗时的平均值、P50、P95。
 - thinking/回复块和字符量、thinking/output 比、partial 数量。
 - 工具调用、结果、错误率、平均/P95 耗时、孤立调用与结果。
@@ -37,6 +38,13 @@
   `cache_creation_input_tokens` 来自 `ResultMessage.usage`。
 - `total_cost_usd` 来自 `ResultMessage.total_cost_usd`；第三方模型未返回时保留为空，
   分析服务不按公开价猜测实际账单。
+- API 的 `cost.sdk_reported_usd` 是上面 SDK 字段的聚合，仅作为“SDK Claude 计价参考”。
+  `cost.model_estimates` 按 `turn_model_usage.model` 匹配
+  `model_pricing.json` 中的模型单价，分别估算输入/输出/缓存费用；
+  未配置的模型不会套用其他模型价格，仅列入 `unpriced_models`。
+- 当本周期所有模型都有完整价格时，`cost.actual_usd` / `configured_actual_usd`
+  是价格文件计算出的实际花费；配置不完整时返回为空，避免少算。
+- `cost.estimated_breakdown_usd` 是已匹配模型的分类费用，网页主费用使用完整配置后的 `actual_usd`。
 - `duration_ms` 是 SDK 报告的 Agent 总耗时，`duration_api_ms` 是其中的模型 API 耗时。
 - `turn_model_usage` 保存 `ResultMessage.model_usage` 的逐模型 token、成本、provider、
   canonical model 和 Web Search 次数。
@@ -77,6 +85,31 @@ chmod 600 .env
 ./manage.sh stop
 ```
 
+价格单独维护在 `analytics/model_pricing.json`，key 必须使用日志
+`ResultMessage.model_usage` 中的实际模型名。例如：
+
+```json
+{
+  "deepseek-v4-flash-ga-260731": {
+    "input": 0.27,
+    "output": 1.10,
+    "cache_read": 0.027,
+    "cache_creation": 0.27
+  },
+  "claude-sonnet-4-5": {
+    "input": 3.0,
+    "output": 15.0,
+    "cache_read": 0.30,
+    "cache_creation": 3.75
+  }
+}
+```
+
+上面的数值只是配置格式示例，部署时应替换成对应模型和渠道的真实价格，单位为美元/百万 token。
+`.env` 默认使用 `./model_pricing.json`，也可以通过 `AIFLOW_ANALYTICS_MODEL_PRICING_FILE` 指定其他路径。
+文件不存在时才会回退到旧版 `AIFLOW_ANALYTICS_MODEL_PRICING_JSON` 和全局价格变量；旧配置只建议作为迁移临时方案。
+价格文件不会改写日志中的 `total_cost_usd`，后者只作为 SDK Claude 计价参考展示。
+
 `start`/`restart` 会等待 `http://127.0.0.1:5090/ready`。`stop` 只操作当前 analytics 目录 PID 文件记录且所有权校验通过的进程。
 
 ## Web 监控台
@@ -89,7 +122,7 @@ http://<服务器地址>:5090/
 
 页面会自动每 30 秒刷新，也可以手动刷新或提交选定日期范围的后台 TLS 同步。首次打开时在登录框输入
 `AIFLOW_ANALYTICS_API_TOKEN` 对应的 Bearer Token；令牌只保存在当前浏览器的 `sessionStorage`，关闭浏览器后不会保留。
-页面展示任务、完成率、Token、费用、耗时、thinking 字符、工具错误率、趋势、模型/工具分布、数据质量和最近任务。
+页面展示任务、完成率、输入/输出/缓存 Token、分类计费估算、按模型价格计算的实际费用、SDK Claude 计价参考、耗时、thinking 字符、工具错误率、趋势、模型/工具分布、数据质量和最近任务。
 点击最近任务可以查看该轮用户输入、模型 thinking、回复、工具调用、工具结果和终态事件的完整时间线。日志内容按纯文本展示，不会作为 HTML 执行。
 
 根路径只返回页面，不返回业务 JSON。健康检查仍使用 `/health` 和 `/ready`，接口文档使用 `/docs`；未授权访问业务 API 仍返回 `401`。

@@ -56,7 +56,24 @@ def test_health_auth_dashboard_and_turn_detail(settings, database) -> None:
             headers=headers,
         )
         assert overview.status_code == 200
-        assert overview.json()["volume"]["turns"] == 1
+        overview_payload = overview.json()
+        assert overview_payload["volume"]["turns"] == 1
+        assert overview_payload["usage"]["cache_read_input_tokens"] == 30
+        assert overview_payload["cost"]["actual_usd"] == 0.000946
+        assert overview_payload["cost"]["sdk_reported_usd"] == 0.12
+        assert overview_payload["cost"]["estimated_breakdown_usd"]["output_usd"] == 0.0006
+        conversations = client.get(
+            "/api/v1/conversations?start_date=2026-08-06&end_date=2026-08-06",
+            headers=headers,
+        )
+        assert conversations.status_code == 200
+        assert conversations.json()["items"][0]["configured_actual_usd"] == 0.000946
+        turns = client.get(
+            "/api/v1/turns?start_date=2026-08-06&end_date=2026-08-06",
+            headers=headers,
+        )
+        assert turns.status_code == 200
+        assert turns.json()["items"][0]["configured_actual_usd"] == 0.000946
         detail = client.get("/api/v1/turns/turn-api", headers=headers)
         assert detail.status_code == 200
         assert detail.json()["turn"]["total_tokens"] == 140

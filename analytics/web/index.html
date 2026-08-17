@@ -59,7 +59,7 @@
     <section class="metric-grid" aria-label="核心指标">
       <article class="metric-card accent-teal"><span>任务数</span><strong id="metric-turns">--</strong><small id="metric-turns-note">-- 个对话</small></article>
       <article class="metric-card accent-blue"><span>完成率</span><strong id="metric-completion">--</strong><small id="metric-completion-note">-- 完成 / -- 失败</small></article>
-      <article class="metric-card accent-violet"><span>总 Token</span><strong id="metric-tokens">--</strong><small id="metric-tokens-note">输入 -- / 输出 --</small></article>
+      <article class="metric-card accent-violet"><span>总 Token</span><strong id="metric-tokens">--</strong><small id="metric-tokens-note">输入 -- / 输出 -- / 缓存读取 --</small></article>
       <article class="metric-card accent-coral"><span>总费用</span><strong id="metric-cost">--</strong><small id="metric-cost-note">单任务 --</small></article>
       <article class="metric-card accent-amber"><span>平均服务耗时</span><strong id="metric-latency">--</strong><small id="metric-latency-note">P95 --</small></article>
       <article class="metric-card accent-slate"><span>工具错误率</span><strong id="metric-tool-errors">--</strong><small id="metric-tool-errors-note">-- 次调用 / -- 次错误</small></article>
@@ -87,6 +87,11 @@
       <article class="panel">
         <div class="panel-heading"><div><h2>模型用量</h2><p>Token、成本和任务分布</p></div></div>
         <div class="bar-list" id="models-list"></div>
+      </article>
+      <article class="panel pricing-panel">
+        <div class="panel-heading"><div><h2>费用与计费</h2><p>实际花费按 model_pricing.json 的模型单价计算，SDK 价格仅作参考</p></div><span id="pricing-badge" class="small-badge">读取中</span></div>
+        <div class="pricing-list" id="pricing-list"></div>
+        <div class="pricing-actual"><span>实际花费（按模型价格）</span><strong id="actual-cost">--</strong><small id="actual-cost-note">来源：model_pricing.json</small></div>
       </article>
       <article class="panel">
         <div class="panel-heading"><div><h2>工具调用</h2><p>完成、错误和平均耗时</p></div></div>

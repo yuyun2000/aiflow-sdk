@@ -59,7 +59,29 @@ def create_app(
     db = database or Database(settings.database_path, settings.tls_schema_version)
     client = tls_client or TLSLogClient(settings)
     sync = sync_service or SyncService(settings, db, client)
-    analytics = Analytics(db, settings.timezone)
+    model_pricing = dict(settings.model_pricing)
+    if not model_pricing and any(
+        value is not None
+        for value in (
+            settings.input_price_usd_per_million,
+            settings.output_price_usd_per_million,
+            settings.cache_read_price_usd_per_million,
+            settings.cache_creation_price_usd_per_million,
+        )
+    ):
+        # Explicitly preserve the old configuration during migration. New
+        # deployments should use exact model names in the pricing JSON file.
+        model_pricing["*"] = {
+            key: value
+            for key, value in {
+                "input": settings.input_price_usd_per_million,
+                "output": settings.output_price_usd_per_million,
+                "cache_read": settings.cache_read_price_usd_per_million,
+                "cache_creation": settings.cache_creation_price_usd_per_million,
+            }.items()
+            if value is not None
+        }
+    analytics = Analytics(db, settings.timezone, model_pricing=model_pricing)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):

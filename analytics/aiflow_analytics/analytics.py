@@ -40,6 +40,12 @@ def _sum(rows: list[dict[str, Any]], field: str) -> int | float:
     return sum(row.get(field) or 0 for row in rows)
 
 
+def _priced_tokens(tokens: int | float, price: float | None) -> float | None:
+    if price is None:
+        return None
+    return round(float(tokens) * price / 1_000_000, 6)
+
+
 @dataclass(frozen=True, slots=True)
 class Period:
     start_ms: int
@@ -63,9 +69,200 @@ class Period:
 
 
 class Analytics:
-    def __init__(self, database: Database, timezone_name: str) -> None:
+    _PRICE_FIELDS = ("input", "output", "cache_read", "cache_creation")
+
+    def __init__(
+        self,
+        database: Database,
+        timezone_name: str,
+        pricing: dict[str, float | None] | None = None,
+        model_pricing: dict[str, dict[str, float | None]] | None = None,
+    ) -> None:
         self.database = database
         self.timezone = ZoneInfo(timezone_name)
+        if model_pricing is not None:
+            self.model_pricing = {
+                str(model): dict(values) for model, values in model_pricing.items()
+            }
+        elif pricing is not None:
+            # Backwards-compatible explicit wildcard pricing. The application
+            # only creates this fallback when legacy env vars are present.
+            self.model_pricing = {"*": dict(pricing)}
+        else:
+            self.model_pricing = {}
+
+    def _pricing_for_model(self, model: str) -> dict[str, float | None] | None:
+        prices = self.model_pricing.get(model)
+        if prices is not None:
+            return prices
+        return self.model_pricing.get("*")
+
+    def _model_estimates_from_rows(
+        self,
+        model_rows: list[dict[str, Any]],
+        fallback_rows: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        if model_rows:
+            covered_turn_ids = {
+                str(row["turn_id"])
+                for row in model_rows
+                if row.get("turn_id") is not None
+            }
+            if covered_turn_ids:
+                model_rows = [
+                    *model_rows,
+                    *(
+                        row
+                        for row in fallback_rows
+                        if row.get("turn_id") is not None
+                        and str(row["turn_id"]) not in covered_turn_ids
+                    ),
+                ]
+        else:
+            model_rows = [
+                {
+                    "model": row.get("primary_model") or "unknown",
+                    "canonical_model": row.get("primary_model") or "",
+                    "primary_model": row.get("primary_model") or "",
+                    "input_tokens": row.get("input_tokens") or 0,
+                    "output_tokens": row.get("output_tokens") or 0,
+                    "cache_read_input_tokens": row.get("cache_read_input_tokens") or 0,
+                    "cache_creation_input_tokens": row.get("cache_creation_input_tokens") or 0,
+                }
+                for row in fallback_rows
+            ]
+        grouped: dict[str, dict[str, int]] = {}
+        for row in model_rows:
+            model = str(
+                row.get("model")
+                or row.get("canonical_model")
+                or row.get("primary_model")
+                or "unknown"
+            )
+            current = grouped.setdefault(
+                model,
+                {
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "cache_read_input_tokens": 0,
+                    "cache_creation_input_tokens": 0,
+                },
+            )
+            for field in current:
+                current[field] += int(row.get(field) or 0)
+
+        estimates: list[dict[str, Any]] = []
+        for model, counts in sorted(grouped.items()):
+            prices = self._pricing_for_model(model)
+            breakdown = {
+                "input_usd": _priced_tokens(
+                    counts["input_tokens"], prices.get("input") if prices else None
+                ),
+                "output_usd": _priced_tokens(
+                    counts["output_tokens"], prices.get("output") if prices else None
+                ),
+                "cache_read_usd": _priced_tokens(
+                    counts["cache_read_input_tokens"],
+                    prices.get("cache_read") if prices else None,
+                ),
+                "cache_creation_usd": _priced_tokens(
+                    counts["cache_creation_input_tokens"],
+                    prices.get("cache_creation") if prices else None,
+                ),
+            }
+            values = [value for value in breakdown.values() if value is not None]
+            configured = bool(prices) and all(key in prices for key in self._PRICE_FIELDS)
+            estimates.append(
+                {
+                    "model": model,
+                    "configured": configured,
+                    "tokens": counts,
+                    "unit_prices_usd_per_million": prices or {},
+                    "estimated_breakdown_usd": breakdown,
+                    "estimated_usd": round(sum(values), 6) if values else None,
+                }
+            )
+        return estimates
+
+    def _model_estimates(
+        self,
+        period: Period,
+        rows: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        model_rows = self.database.query(
+            """
+            SELECT m.model, m.canonical_model, t.primary_model,
+                   m.turn_id,
+                   m.input_tokens, m.output_tokens,
+                   m.cache_read_input_tokens, m.cache_creation_input_tokens
+            FROM turn_model_usage m
+            JOIN turns t ON t.turn_id=m.turn_id
+            WHERE t.input_time_ms>=? AND t.input_time_ms<?
+            """,
+            (period.start_ms, period.end_ms),
+        )
+        return self._model_estimates_from_rows(model_rows, rows)
+
+    def _cost_fields(
+        self,
+        model_rows: list[dict[str, Any]],
+        fallback_rows: list[dict[str, Any]],
+        sdk_reported_usd: float | None,
+    ) -> dict[str, Any]:
+        estimates = self._model_estimates_from_rows(model_rows, fallback_rows)
+        complete = bool(estimates) and all(item["configured"] for item in estimates)
+        configured_cost = (
+            round(sum(item["estimated_usd"] or 0 for item in estimates), 6)
+            if complete
+            else None
+        )
+        return {
+            "configured_actual_usd": configured_cost,
+            "pricing_complete": complete,
+            "sdk_reported_usd": sdk_reported_usd,
+        }
+
+    def _turn_cost_fields(self, turn: dict[str, Any]) -> dict[str, Any]:
+        model_rows = self.database.query(
+            """
+            SELECT model, canonical_model, turn_id, input_tokens, output_tokens,
+                   cache_read_input_tokens, cache_creation_input_tokens
+            FROM turn_model_usage WHERE turn_id=?
+            """,
+            (turn["turn_id"],),
+        )
+        return self._cost_fields(model_rows, [turn], turn.get("total_cost_usd"))
+
+    def _conversation_cost_fields(
+        self,
+        period: Period,
+        conversation_id: str,
+        project_id: str,
+        sdk_reported_usd: float | None,
+    ) -> dict[str, Any]:
+        model_rows = self.database.query(
+            """
+            SELECT m.model, m.canonical_model, m.turn_id,
+                   m.input_tokens, m.output_tokens,
+                   m.cache_read_input_tokens, m.cache_creation_input_tokens
+            FROM turn_model_usage m
+            JOIN turns t ON t.turn_id=m.turn_id
+            WHERE t.input_time_ms>=? AND t.input_time_ms<?
+              AND t.conversation_id=? AND t.project_id=?
+            """,
+            (period.start_ms, period.end_ms, conversation_id, project_id),
+        )
+        fallback_rows = self.database.query(
+            """
+            SELECT turn_id, primary_model, input_tokens, output_tokens,
+                   cache_read_input_tokens, cache_creation_input_tokens
+            FROM turns
+            WHERE input_time_ms>=? AND input_time_ms<?
+              AND conversation_id=? AND project_id=?
+            """,
+            (period.start_ms, period.end_ms, conversation_id, project_id),
+        )
+        return self._cost_fields(model_rows, fallback_rows, sdk_reported_usd)
 
     def _turn_rows(self, period: Period) -> list[dict[str, Any]]:
         period.validate()
@@ -83,7 +280,53 @@ class Analytics:
         input_tokens = int(_sum(rows, "input_tokens"))
         output_tokens = int(_sum(rows, "output_tokens"))
         total_tokens = int(_sum(rows, "total_tokens"))
-        cost = round(float(_sum(rows, "total_cost_usd")), 6)
+        cost_values = [
+            float(row["total_cost_usd"])
+            for row in rows
+            if row.get("total_cost_usd") is not None
+        ]
+        actual_cost = round(sum(cost_values), 6) if cost_values else None
+        # Keep total_usd as the established numeric field while exposing whether
+        # the SDK returned a billable value for this period.
+        cost = actual_cost if actual_cost is not None else 0.0
+        cache_read_tokens = int(_sum(rows, "cache_read_input_tokens"))
+        cache_creation_tokens = int(_sum(rows, "cache_creation_input_tokens"))
+        model_estimates = self._model_estimates(period, rows)
+        estimated_breakdown = {
+            field: (
+                round(
+                    sum(
+                        item["estimated_breakdown_usd"][field]
+                        for item in model_estimates
+                        if item["estimated_breakdown_usd"][field] is not None
+                    ),
+                    6,
+                )
+                if any(
+                    item["estimated_breakdown_usd"][field] is not None
+                    for item in model_estimates
+                )
+                else None
+            )
+            for field in (
+                "input_usd",
+                "output_usd",
+                "cache_read_usd",
+                "cache_creation_usd",
+            )
+        }
+        estimated_values = [
+            value for value in estimated_breakdown.values() if value is not None
+        ]
+        estimated_total = round(sum(estimated_values), 6) if estimated_values else None
+        pricing_complete = bool(model_estimates) and all(
+            item["configured"] for item in model_estimates
+        )
+        configured_actual_cost = (
+            round(sum(item["estimated_usd"] or 0 for item in model_estimates), 6)
+            if pricing_complete
+            else None
+        )
         assistant_chars = int(_sum(rows, "assistant_chars"))
         thinking_chars = int(_sum(rows, "thinking_chars"))
         tool_calls = int(_sum(rows, "tool_call_count"))
@@ -112,15 +355,31 @@ class Analytics:
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
                 "total_tokens": total_tokens,
-                "cache_read_input_tokens": int(_sum(rows, "cache_read_input_tokens")),
-                "cache_creation_input_tokens": int(
-                    _sum(rows, "cache_creation_input_tokens")
-                ),
+                "cache_read_input_tokens": cache_read_tokens,
+                "cache_creation_input_tokens": cache_creation_tokens,
                 "tokens_per_turn": _ratio(total_tokens, total),
                 "output_input_ratio": _ratio(output_tokens, input_tokens),
             },
             "cost": {
+                # total_usd is retained for API compatibility and is the SDK's
+                # Claude-priced value. actual_usd is the configured model-price total.
                 "total_usd": cost,
+                "actual_usd": configured_actual_cost,
+                "actual_source": "model_pricing_file",
+                "configured_actual_usd": configured_actual_cost,
+                "sdk_reported_usd": actual_cost,
+                "sdk_reported_source": "claude_sdk.total_cost_usd",
+                "pricing_complete": pricing_complete,
+                "estimated_usd": estimated_total,
+                "estimated_breakdown_usd": estimated_breakdown,
+                "model_estimates": model_estimates,
+                "pricing_models": [
+                    item["model"] for item in model_estimates if item["configured"]
+                ],
+                "unpriced_models": [
+                    item["model"] for item in model_estimates if not item["configured"]
+                ],
+                "pricing_basis": "per_model_configured_unit_prices",
                 "per_turn_usd": _ratio(cost, total),
                 "per_completed_turn_usd": _ratio(cost, completed),
                 "per_1k_tokens_usd": _ratio(cost * 1000, total_tokens),
@@ -188,7 +447,7 @@ class Analytics:
             "volume.completion_rate",
             "usage.total_tokens",
             "usage.output_tokens",
-            "cost.total_usd",
+            "cost.actual_usd",
             "latency_ms.agent_p95",
             "latency_ms.service_p95",
             "content.thinking_chars",
@@ -248,6 +507,7 @@ class Analytics:
                     "completion_rate": summary["volume"]["completion_rate"],
                     "tokens": summary["usage"]["total_tokens"],
                     "cost_usd": summary["cost"]["total_usd"],
+                    "configured_actual_usd": summary["cost"]["actual_usd"],
                     "agent_p95_ms": summary["latency_ms"]["agent_p95"],
                     "service_p95_ms": summary["latency_ms"]["service_p95"],
                     "tool_calls": summary["tools"]["calls"],
@@ -280,6 +540,40 @@ class Analytics:
             """,
             (*params, limit),
         )
+        for model in models:
+            prices = self._pricing_for_model(str(model["model"]))
+            model["configured"] = bool(prices) and all(
+                key in prices for key in self._PRICE_FIELDS
+            )
+            model["unit_prices_usd_per_million"] = prices or {}
+            model["estimated_breakdown_usd"] = {
+                "input_usd": _priced_tokens(
+                    model["input_tokens"], prices.get("input") if prices else None
+                ),
+                "output_usd": _priced_tokens(
+                    model["output_tokens"], prices.get("output") if prices else None
+                ),
+                "cache_read_usd": _priced_tokens(
+                    model["cache_read_input_tokens"],
+                    prices.get("cache_read") if prices else None,
+                ),
+                "cache_creation_usd": _priced_tokens(
+                    model["cache_creation_input_tokens"],
+                    prices.get("cache_creation") if prices else None,
+                ),
+            }
+            model["configured_actual_usd"] = (
+                round(
+                    sum(
+                        value
+                        for value in model["estimated_breakdown_usd"].values()
+                        if value is not None
+                    ),
+                    6,
+                )
+                if model["configured"]
+                else None
+            )
         tool_rows = self.database.query(
             """
             SELECT c.* FROM tool_calls c
@@ -312,6 +606,10 @@ class Analytics:
             )
         tools.sort(key=lambda item: (-item["calls"], item["tool_name"]))
         dimensions = {}
+        period_turns = self._turn_rows(period)
+        period_turn_costs = {
+            turn["turn_id"]: self._turn_cost_fields(turn) for turn in period_turns
+        }
         for name, field in (
             ("statuses", "status"),
             ("turn_kinds", "turn_kind"),
@@ -320,6 +618,19 @@ class Analytics:
             ("error_codes", "error_code"),
             ("projects", "project_id"),
         ):
+            totals: dict[str, float] = defaultdict(float)
+            complete: dict[str, bool] = defaultdict(lambda: True)
+            for turn in period_turns:
+                value = str(turn.get(field) or "")
+                if not value:
+                    continue
+                configured_cost = period_turn_costs[turn["turn_id"]][
+                    "configured_actual_usd"
+                ]
+                if configured_cost is None:
+                    complete[value] = False
+                else:
+                    totals[value] += configured_cost
             dimensions[name] = self.database.query(
                 f"""
                 SELECT {field} AS value, COUNT(*) AS turns,
@@ -333,6 +644,11 @@ class Analytics:
                 """,
                 (*params, limit),
             )
+            for item in dimensions[name]:
+                value = str(item["value"])
+                item["configured_actual_usd"] = (
+                    round(totals[value], 6) if complete[value] else None
+                )
         return {
             "period": period.as_dict(self.timezone),
             "models": models,
@@ -369,7 +685,7 @@ class Analytics:
                    SUM(status='failed') AS failed,
                    SUM(status='cancelled') AS cancelled,
                    SUM(total_tokens) AS total_tokens,
-                   ROUND(SUM(COALESCE(total_cost_usd, 0)), 6) AS total_cost_usd,
+                   ROUND(SUM(total_cost_usd), 6) AS total_cost_usd,
                    SUM(tool_call_count) AS tool_calls,
                    SUM(thinking_chars) AS thinking_chars,
                    SUM(assistant_chars) AS assistant_chars
@@ -380,6 +696,15 @@ class Analytics:
             """,
             (*params, page_size, offset),
         )
+        for item in items:
+            item.update(
+                self._conversation_cost_fields(
+                    period,
+                    str(item["conversation_id"]),
+                    str(item["project_id"]),
+                    item.get("total_cost_usd"),
+                )
+            )
         total = int(total_row["count"] if total_row else 0)
         return {
             "items": items,
@@ -433,6 +758,8 @@ class Analytics:
             """,
             (*params, page_size, offset),
         )
+        for item in items:
+            item.update(self._turn_cost_fields(item))
         total = int(total_row["count"] if total_row else 0)
         return {
             "items": items,
@@ -470,6 +797,38 @@ class Analytics:
             "SELECT * FROM turn_model_usage WHERE turn_id=? ORDER BY cost_usd DESC, model",
             (turn_id,),
         )
+        turn.update(self._turn_cost_fields(turn))
+        for model in models:
+            prices = self._pricing_for_model(str(model["model"]))
+            model["configured_actual_usd"] = (
+                round(
+                    sum(
+                        value
+                        for value in (
+                            _priced_tokens(
+                                model["input_tokens"],
+                                prices.get("input") if prices else None,
+                            ),
+                            _priced_tokens(
+                                model["output_tokens"],
+                                prices.get("output") if prices else None,
+                            ),
+                            _priced_tokens(
+                                model["cache_read_input_tokens"],
+                                prices.get("cache_read") if prices else None,
+                            ),
+                            _priced_tokens(
+                                model["cache_creation_input_tokens"],
+                                prices.get("cache_creation") if prices else None,
+                            ),
+                        )
+                        if value is not None
+                    ),
+                    6,
+                )
+                if prices and all(key in prices for key in self._PRICE_FIELDS)
+                else None
+            )
         return {"turn": turn, "events": events, "tools": tools, "models": models}
 
     def data_quality(self, period: Period | None = None) -> dict[str, Any]:

@@ -31,6 +31,14 @@ def settings(tmp_path):
         auth_disabled=False,
         api_token="fake-api-token-with-32-characters",
         default_range_days=7,
+        model_pricing={
+            "claude-sonnet-test": {
+                "input": 3.0,
+                "output": 15.0,
+                "cache_read": 0.30,
+                "cache_creation": 3.75,
+            }
+        },
     )
 
 

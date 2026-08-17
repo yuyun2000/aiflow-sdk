@@ -24,6 +24,7 @@
   };
   const percent = (value, digits = 1) => value === null || value === undefined ? "--" : `${(Number(value) * 100).toFixed(digits)}%`;
   const usd = (value) => value === null || value === undefined ? "--" : `$${Number(value).toFixed(4)}`;
+  const usdPerMillion = (value) => value === null || value === undefined ? "未配置" : `$${Number(value).toFixed(2)} / 1M`;
   const millis = (value) => {
     if (value === null || value === undefined || Number.isNaN(Number(value))) return "--";
     const ms = Number(value);
@@ -148,9 +149,9 @@
     setText("metric-completion", percent(volume.completion_rate));
     setText("metric-completion-note", `${number(volume.completed)} 完成 / ${number(volume.failed)} 失败`);
     setText("metric-tokens", number(usage.total_tokens));
-    setText("metric-tokens-note", `输入 ${number(usage.input_tokens)} / 输出 ${number(usage.output_tokens)}`);
-    setText("metric-cost", usd(cost.total_usd));
-    setText("metric-cost-note", `单任务 ${usd(cost.per_turn_usd)}`);
+    setText("metric-tokens-note", `输入 ${number(usage.input_tokens)} / 输出 ${number(usage.output_tokens)} / 缓存读取 ${number(usage.cache_read_input_tokens)}`);
+    setText("metric-cost", usd(cost.actual_usd));
+    setText("metric-cost-note", `SDK Claude计价参考 ${usd(cost.sdk_reported_usd)}`);
     setText("metric-latency", millis(latency.service_avg));
     setText("metric-latency-note", `P95 ${millis(latency.service_p95)}`);
     setText("metric-tool-errors", percent(tools.error_rate));
@@ -163,10 +164,11 @@
     setText("queue-avg", millis(latency.queue_avg));
     setText("deploy-rate", percent(deployment.success_rate));
     setText("range-label", `${state.startDate} 至 ${state.endDate} · ${number(volume.turns)} 个任务`);
+    renderPricing(overview);
     renderHealth(volume, data.breakdowns || {});
     renderBars("models-list", data.breakdowns?.models || [], (item) => ({
       name: formatModel(item.canonical_model || item.model),
-      detail: `${number(item.turns)} 任务 · ${usd(item.cost_usd)}`,
+      detail: `${number(item.turns)} 任务 · 实际 ${usd(item.configured_actual_usd)}`,
       value: number(item.input_tokens + item.output_tokens),
       max: item.turns,
     }));
@@ -178,12 +180,66 @@
     }));
     renderBars("statuses-list", data.breakdowns?.statuses || [], (item) => ({
       name: statusLabel(item.value),
-      detail: `${number(item.tokens)} Token · ${usd(item.cost_usd)}`,
+      detail: `${number(item.tokens)} Token · 实际 ${usd(item.configured_actual_usd)}`,
       value: item.turns,
       max: item.turns,
     }));
     renderQuality(data.data_quality || {});
     drawTrend(data.trends?.points || []);
+  }
+
+  function renderPricing(overview) {
+    const cost = overview.cost || {};
+    const models = cost.model_estimates || [];
+    const list = $("pricing-list");
+    list.replaceChildren();
+    if (!models.length) {
+      const empty = document.createElement("div");
+      empty.className = "empty-row";
+      empty.textContent = "当前范围没有可按模型计价的日志";
+      list.append(empty);
+    }
+    models.forEach((model) => {
+      const heading = document.createElement("div");
+      heading.className = "pricing-model-heading";
+      const modelName = document.createElement("strong");
+      modelName.textContent = formatModel(model.model);
+      modelName.title = text(model.model);
+      const modelStatus = document.createElement("span");
+      modelStatus.textContent = model.configured ? "已配置" : "未配置单价";
+      modelStatus.className = model.configured ? "pricing-configured" : "pricing-unconfigured";
+      heading.append(modelName, modelStatus);
+      list.append(heading);
+      const tokens = model.tokens || {};
+      const units = model.unit_prices_usd_per_million || {};
+      const breakdown = model.estimated_breakdown_usd || {};
+      [
+        ["输入", tokens.input_tokens, units.input, breakdown.input_usd],
+        ["输出", tokens.output_tokens, units.output, breakdown.output_usd],
+        ["缓存读取", tokens.cache_read_input_tokens, units.cache_read, breakdown.cache_read_usd],
+        ["缓存写入", tokens.cache_creation_input_tokens, units.cache_creation, breakdown.cache_creation_usd],
+      ].forEach(([label, tokenCount, unit, estimated]) => {
+        const row = document.createElement("div");
+        row.className = "pricing-row";
+        const name = document.createElement("span");
+        name.textContent = label;
+        const count = document.createElement("span");
+        count.className = "pricing-count";
+        count.textContent = `${number(tokenCount)} Token`;
+        const price = document.createElement("span");
+        price.className = "pricing-price";
+        price.textContent = `${usdPerMillion(unit)} · ${usd(estimated)}`;
+        row.append(name, count, price);
+        list.append(row);
+      });
+    });
+    setText("actual-cost", usd(cost.actual_usd));
+    setText("actual-cost-note", `按 model_pricing.json 计算 · SDK Claude计价参考 ${usd(cost.sdk_reported_usd)}`);
+    const badge = $("pricing-badge");
+    const configured = models.filter((model) => model.configured).length;
+    const allConfigured = models.length > 0 && configured === models.length;
+    badge.className = `small-badge ${allConfigured ? "good" : "warn"}`;
+    badge.textContent = allConfigured ? "按模型估算" : configured ? "部分配置" : "未配置单价";
   }
 
   function qualityPercent(quality) {
@@ -370,7 +426,7 @@
       const status = document.createElement("td"); const pill = document.createElement("span"); pill.className = `state-pill ${text(item.status, "").toLowerCase()}`; pill.textContent = statusLabel(item.status); status.append(pill);
       const model = document.createElement("td"); model.textContent = formatModel(item.primary_model);
       const tokens = document.createElement("td"); tokens.className = "numeric"; tokens.textContent = number(item.total_tokens);
-      const cost = document.createElement("td"); cost.className = "numeric"; cost.textContent = usd(item.total_cost_usd);
+      const cost = document.createElement("td"); cost.className = "numeric"; cost.textContent = usd(item.configured_actual_usd);
       const duration = document.createElement("td"); duration.className = "numeric"; duration.textContent = millis(item.service_duration_ms || item.duration_ms);
       const toolCount = document.createElement("td"); toolCount.textContent = `${number(item.tool_call_count)} 次`;
       const updated = document.createElement("td"); updated.textContent = dateText(item.updated_at || item.last_event_ms);
@@ -399,7 +455,7 @@
     const body = $("detail-body"); body.replaceChildren();
     setText("detail-title", turn.turn_id);
     const summary = document.createElement("div"); summary.className = "detail-summary";
-    [["状态", statusLabel(turn.status)], ["模型", formatModel(turn.primary_model)], ["Token", number(turn.total_tokens)], ["费用", usd(turn.total_cost_usd)], ["服务耗时", millis(turn.service_duration_ms)], ["工具调用", number(turn.tool_call_count)]].forEach(([label, value]) => {
+    [["状态", statusLabel(turn.status)], ["模型", formatModel(turn.primary_model)], ["Token", number(turn.total_tokens)], ["实际费用", usd(turn.configured_actual_usd)], ["SDK参考", usd(turn.sdk_reported_usd)], ["服务耗时", millis(turn.service_duration_ms)], ["工具调用", number(turn.tool_call_count)]].forEach(([label, value]) => {
       const stat = document.createElement("div"); stat.className = "detail-stat"; const name = document.createElement("span"); name.textContent = label; const val = document.createElement("strong"); val.textContent = value; stat.append(name, val); summary.append(stat);
     });
     body.append(summary);
@@ -422,8 +478,8 @@
     rows.forEach((row) => {
       const item = document.createElement("div"); item.className = `${kind}-detail-row`;
       const first = document.createElement("strong"); first.textContent = kind === "tool" ? text(row.tool_name || row.tool_type) : formatModel(row.model);
-      const second = document.createElement("span"); second.textContent = kind === "tool" ? `${row.is_error ? "错误" : "完成"} · ${millis(row.duration_ms)}` : `${number(Number(row.input_tokens || 0) + Number(row.output_tokens || 0))} Token`;
-      const third = document.createElement("span"); third.textContent = kind === "tool" ? text(row.tool_use_id) : usd(row.cost_usd);
+      const second = document.createElement("span"); second.textContent = kind === "tool" ? `${row.is_error ? "错误" : "完成"} · ${millis(row.duration_ms)}` : `输入 ${number(row.input_tokens)} · 输出 ${number(row.output_tokens)} · 缓存 ${number(row.cache_read_input_tokens)}`;
+      const third = document.createElement("span"); third.textContent = kind === "tool" ? text(row.tool_use_id) : usd(row.configured_actual_usd);
       item.append(first, second, third); section.append(item);
     });
     body.append(section);
