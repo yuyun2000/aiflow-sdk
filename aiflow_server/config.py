@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from .asr import AsrSettings, DEFAULT_URL, DEFAULT_RESOURCE_ID
+
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG_PATH = ROOT_DIR / "server_config.json"
@@ -189,6 +191,7 @@ class Settings:
     web_ai_tasks_per_session_day: int
     web_ai_tasks_per_ip_day: int
     tls_logging: TlsLoggingSettings
+    asr: AsrSettings
 
     @property
     def database_path(self) -> Path:
@@ -218,6 +221,12 @@ class Settings:
             "max_attachments": self.max_attachments,
             "max_attachment_bytes": self.max_attachment_bytes,
             "max_attachment_total_bytes": self.max_attachment_total_bytes,
+            "asr": {
+                "enabled": self.asr.enabled,
+                "configured": self.asr.auth_configured,
+                "resource_id": self.asr.resource_id,
+                "url": self.asr.url,
+            },
             "client_auth": {
                 "enabled": self.client_auth_enabled,
                 "scheme": "AIFLOW-HMAC-SHA256-V1" if self.client_auth_enabled else None,
@@ -349,6 +358,24 @@ def load_settings(path: str | Path | None = None) -> Settings:
     if retry_max_seconds < retry_base_seconds:
         raise ConfigError("telemetry.retry_max_seconds must be at least retry_base_seconds")
 
+    asr_url = str(os.environ.get("AIFLOW_ASR_URL") or _nested(data, "asr", "url", DEFAULT_URL)).strip()
+    if not asr_url.startswith("wss://"):
+        raise ConfigError("asr.url must be a wss:// URL")
+    asr_enabled = _boolean(
+        os.environ.get("AIFLOW_ASR_ENABLED") or _nested(data, "asr", "enabled", False),
+        "asr.enabled",
+    )
+    asr_timeout = _non_negative_float(
+        os.environ.get("AIFLOW_ASR_TIMEOUT_SECONDS") or _nested(data, "asr", "timeout_seconds", 30),
+        "asr.timeout_seconds",
+    )
+    if asr_timeout <= 0:
+        raise ConfigError("asr.timeout_seconds must be greater than zero")
+    asr_segment_duration = _positive_int(
+        os.environ.get("AIFLOW_ASR_SEGMENT_DURATION_MS") or _nested(data, "asr", "segment_duration_ms", 200),
+        "asr.segment_duration_ms",
+    )
+
     return Settings(
         config_path=config_path,
         root_dir=ROOT_DIR,
@@ -373,7 +400,9 @@ def load_settings(path: str | Path | None = None) -> Settings:
         enabled_skills=tuple(skills),
         m5stack_mcp_enabled=bool(_nested(data, "mcp", "m5stack_enabled", True)),
         m5stack_mcp_url=str(_nested(data, "mcp", "m5stack_url", "https://mcp.m5stack.com/sse")),
-        device_push_base_url=_normalize_base_url(str(_nested(data, "device_push", "base_url", "https://ai-flow.m5stack.com/"))),
+        device_push_base_url=_normalize_base_url(
+            str(_nested(data, "device_push", "base_url", "https://uiflow2.m5stack.com/m5stack/"))
+        ),
         device_push_timeout=float(_nested(data, "device_push", "timeout_seconds", 120)),
         max_sessions=_positive_int(
             os.environ.get("AIFLOW_MAX_SESSIONS") or _nested(data, "capacity", "max_sessions", 100),
@@ -500,5 +529,15 @@ def load_settings(path: str | Path | None = None) -> Settings:
                 or _nested(data, "telemetry", "max_payload_bytes", 131072),
                 "telemetry.max_payload_bytes",
             ),
+        ),
+        asr=AsrSettings(
+            enabled=asr_enabled,
+            url=asr_url,
+            api_key=os.environ.get("AIFLOW_ASR_API_KEY", "").strip(),
+            app_key=os.environ.get("AIFLOW_ASR_APP_KEY", "").strip(),
+            access_key=os.environ.get("AIFLOW_ASR_ACCESS_KEY", "").strip(),
+            resource_id=str(os.environ.get("AIFLOW_ASR_RESOURCE_ID") or _nested(data, "asr", "resource_id", DEFAULT_RESOURCE_ID)).strip(),
+            timeout_seconds=asr_timeout,
+            segment_duration_ms=asr_segment_duration,
         ),
     )

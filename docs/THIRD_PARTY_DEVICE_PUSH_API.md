@@ -4,7 +4,7 @@
 
 本文档描述 VibeM5Stack Local 版本中用于向已绑定设备推送源代码和资源文件的 HTTP 接口。
 
-- 默认服务地址：`https://ai-flow.m5stack.com/`
+- 默认服务地址：`https://uiflow2.m5stack.com/m5stack/`
 - 鉴权：Local 版本默认不需要登录鉴权
 - 前置条件：`deviceId` 必须已绑定到设备 MAC 地址
 - 调用方初始化时必须同时保存客户端传入的 `deviceId` 和 `clientId`；禁止用内部项目 ID 替代 `clientId`
@@ -40,7 +40,7 @@ print("Hello VibeM5Stack")
 
 ```bash
 curl -X POST \
-  "https://ai-flow.m5stack.com/api/v1/device/push-code/device-123" \
+  "https://uiflow2.m5stack.com/m5stack/api/v1/device/push-code/device-123" \
   -H "Content-Type: text/plain; charset=UTF-8" \
   --data-binary "@main.py"
 ```
@@ -49,7 +49,7 @@ curl -X POST \
 
 ```bash
 curl -X POST \
-  "https://ai-flow.m5stack.com/api/v1/device/push-code/device-123" \
+  "https://uiflow2.m5stack.com/m5stack/api/v1/device/push-code/device-123" \
   -H "Content-Type: text/plain; charset=UTF-8" \
   --data-binary 'print("hello")'
 ```
@@ -105,7 +105,7 @@ Content-Type: multipart/form-data
 完整地址示例：
 
 ```text
-https://ai-flow.m5stack.com/api/v1/localFiles/upload-resource-batch-and-push?deviceId=device-123&clientId=client-123
+https://uiflow2.m5stack.com/m5stack/api/v1/localFiles/upload-resource-batch-and-push?deviceId=device-123&clientId=client-123
 ```
 
 | 参数 | 位置 | 类型 | 必填 | 说明 |
@@ -127,7 +127,7 @@ https://ai-flow.m5stack.com/api/v1/localFiles/upload-resource-batch-and-push?dev
 
 ```bash
 curl -X POST \
-  "https://ai-flow.m5stack.com/api/v1/localFiles/upload-resource-batch-and-push?deviceId=device-123&clientId=client-123" \
+  "https://uiflow2.m5stack.com/m5stack/api/v1/localFiles/upload-resource-batch-and-push?deviceId=device-123&clientId=client-123" \
   -F "files=@logo.png" \
   -F "files=@startup.wav"
 ```
@@ -143,7 +143,7 @@ files[1] -> filePaths[1]
 
 ```bash
 curl -X POST \
-  "https://ai-flow.m5stack.com/api/v1/localFiles/upload-resource-batch-and-push?deviceId=device-123&clientId=client-123" \
+  "https://uiflow2.m5stack.com/m5stack/api/v1/localFiles/upload-resource-batch-and-push?deviceId=device-123&clientId=client-123" \
   -F "files=@logo.png" \
   -F "filePaths=custom/images/" \
   -F "files=@startup.wav" \
@@ -179,8 +179,8 @@ HTTP 状态码：`200 OK`
 {
   "batchId": "a5703ac785f441f3a897d48d2dce9617",
   "urls": [
-    "https://ai-flow.m5stack.com/files/uploads/20260730/abc123-logo.png",
-    "https://ai-flow.m5stack.com/files/uploads/20260730/def456-startup.wav"
+    "https://uiflow2.m5stack.com/m5stack/files/uploads/20260730/abc123-logo.png",
+    "https://uiflow2.m5stack.com/m5stack/files/uploads/20260730/def456-startup.wav"
   ],
   "pushResult": {
     "batchId": "a5703ac785f441f3a897d48d2dce9617",

@@ -317,6 +317,13 @@ print(
     f"(topic={'configured' if tls.topic_id else 'missing'}, "
     f"credentials={'configured' if tls.access_key and tls.secret_key else 'missing'})"
 )
+asr = settings.asr
+print(
+    "Volcengine SAUC ASR: "
+    f"{'enabled' if asr.enabled else 'disabled'} "
+    f"(credentials={'configured' if asr.auth_configured else 'missing'}, "
+    f"resource={asr.resource_id})"
+)
 print(
     "AI task limits: "
     f"{settings.max_ai_tasks_per_client_minute}/client/minute, "

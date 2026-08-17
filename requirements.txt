@@ -10,5 +10,8 @@ claude-agent-sdk==0.2.128
 # Async support (already used by claude_agent_sdk)
 anyio>=4.0.0
 
+# Volcengine SAUC no-stream ASR WebSocket client
+websockets>=14.0
+
 # Volcengine TLS conversation telemetry
 volcengine>=1.0.227,<2

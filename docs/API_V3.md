@@ -59,6 +59,19 @@ AIFLOW_CLAUDE_SUPPORTS_IMAGE_INPUT="false"
 
 返回模型、Skill、上传限制、多模态限制和队列配置，不返回令牌或设备信息。
 
+启用火山引擎 SAUC 后还会返回脱敏状态：
+
+```json
+"asr": {
+  "enabled": true,
+  "configured": true,
+  "resource_id": "volc.seedasr.sauc.duration",
+  "url": "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_nostream"
+}
+```
+
+`configured` 只表示服务端发现凭证，不返回 API Key。浏览器不直接连接火山引擎 WebSocket。
+
 ### `GET /api/v3/system/status`
 
 每次请求实时读取 SQLite 中的会话和任务状态：
@@ -215,6 +228,64 @@ inputs/<conversation_id>/<task_id>/question.wav
 ```
 
 同一消息内的文件名按 Unicode 规范化和大小写折叠后不能重复，避免在不同文件系统中发生静默覆盖。Agent 收到含客户端文件名的相对路径。`claude.supports_image_input=true`（默认）时可按任务需要读取图片；设为 `false` 时，服务通过 SDK `PreToolUse` 拒绝图片 `Read`，同时提示 Agent 只能把图片作为不透明 UIFlow2 资源按路径引用或写入部署清单，不能解码、OCR、描述或猜测内容。SQLite 任务请求只保存类型、MIME、路径、大小和名称，不保存 Base64。限制由 `messages.max_attachments`、`messages.max_attachment_bytes` 和 `messages.max_total_bytes` 配置。
+
+### `POST /api/v3/asr`
+
+对单个 WAV 音频调用火山引擎 SAUC `bigmodel_nostream`，返回整句识别结果。该接口适用于非实时语音输入；AIFlow 服务端负责 WebSocket 二进制协议、gzip 帧和鉴权头，客户端只提交 multipart 文件。
+
+请求必须带 `X-AIFlow-Context-Token`：
+
+| 字段 | 位置 | 必选 | 说明 |
+| --- | --- | --- | --- |
+| `file` | multipart | 是 | 有效 WAV，`audio/wav` 或 `audio/x-wav`，大小受 `uploads.max_bytes` 限制 |
+| `language` | multipart | 否 | 如 `zh-CN`、`en-US`；为空时由模型自动识别 |
+| `enable_punc` | multipart | 否 | 添加标点，默认 `true` |
+| `enable_itn` | multipart | 否 | 规范化数字、金额和日期，默认 `true` |
+| `enable_ddc` | multipart | 否 | 语义顺滑，默认 `true` |
+| `show_utterances` | multipart | 否 | 返回分句信息，默认 `true` |
+
+```bash
+curl -fsS -X POST http://127.0.0.1:8880/api/v3/asr \
+  -H 'X-AIFlow-Context-Token: ctx_secret_...' \
+  -F 'file=@question.wav;type=audio/wav' \
+  -F 'language=zh-CN'
+```
+
+成功响应：
+
+```json
+{
+  "text": "打开客厅空调，退出。",
+  "log_id": "20260808144713DDB668E2B33A9CECA1CD",
+  "duration_ms": 5700,
+  "utterances": [{"text": "打开客厅空调，退出。", "start_time": 120, "end_time": 4800, "definite": true}]
+}
+```
+
+未启用或未配置凭证返回 `503`（`asr_disabled` / `asr_not_configured`）；WAV 无效返回 `400 invalid_audio`；提供方超时返回 `504 asr_timeout`；提供方鉴权失败返回 `502 asr_auth_failed`；其它提供方故障返回 `502 asr_unavailable`。服务配置在 `.env.local`：
+
+```dotenv
+AIFLOW_ASR_ENABLED="true"
+AIFLOW_ASR_API_KEY="replace-with-volcengine-speech-api-key"
+AIFLOW_ASR_RESOURCE_ID="volc.seedasr.sauc.duration"
+```
+
+也支持旧版控制台的 `AIFLOW_ASR_APP_KEY` + `AIFLOW_ASR_ACCESS_KEY`。密钥不能写入 JSON、网页请求或设备工作区。没有真实凭证时只能运行 fake WebSocket 协议测试，不能据此宣称火山引擎真实接口可用。
+
+### `POST /api/v3/asr/stream`
+
+给 ESP32 等不能缓存长音频的客户端使用。请求 body 是原始 PCM 字节流，服务端收到每个 HTTP chunk 后立即切成约 200ms 的 SAUC 音频帧并发送，上游处理期间不会把完整音频写入内存或磁盘。
+
+请求头和查询参数：
+
+```http
+POST /api/v3/asr/stream?format=pcm&rate=16000&bits=16&channel=1&language=zh-CN
+Content-Type: audio/pcm
+X-AIFlow-Context-Token: ctx_secret_...
+Transfer-Encoding: chunked
+```
+
+`format` 必须为 `pcm`；默认 `16000 Hz / 16 bit / mono`。服务端向 SAUC 声明 `pcm` 并发送裸 PCM 帧。客户端应在停止录音后结束 HTTP body，服务端再发送 SAUC 的负序号最终帧并等待整句结果。该接口仍返回同样的 JSON 结果，不提供上游增量文本 SSE。若前面使用 Nginx/Caddy，需关闭该路由的请求体缓冲，否则代理可能先收完整音频再转发。
 
 Agent 仅处理 M5Stack UIFlow2/MicroPython 编程任务。编写或确认 UIFlow2 代码时优先建议使用 `uiflow2-coder`，但服务端不强制工具调用顺序；需要产品规格、屏幕、按键、引脚、电气特性、兼容性或排障依据时，可以直接先使用 `m5stack-assistant` 查询官方 MCP。确认官方资料或工具存在重大问题时，Agent 按 Skill 规则提交 `knowledge_feedback`，并以返回的 `feedback_id` 作为成功依据。
 

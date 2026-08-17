@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from urllib.parse import quote, urlencode, urlsplit, urlunsplit
 
 
-DEFAULT_BASE_URL = "https://ai-flow.m5stack.com/"
+DEFAULT_BASE_URL = "https://uiflow2.m5stack.com/m5stack/"
 DEFAULT_TIMEOUT = 120.0
 MAX_IMAGE_BYTES = 2 * 1024 * 1024
 MAX_FILE_BYTES = 100 * 1024 * 1024
