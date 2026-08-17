@@ -3,11 +3,14 @@ import hmac
 import logging
 from contextlib import asynccontextmanager
 from datetime import date, datetime, time, timedelta
+from pathlib import Path
 from typing import Annotated, Any
 from zoneinfo import ZoneInfo
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Security, status
+from fastapi.responses import FileResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from . import __version__
@@ -19,6 +22,7 @@ from .tls_client import TLSLogClient
 
 LOGGER = logging.getLogger(__name__)
 bearer = HTTPBearer(auto_error=False)
+WEB_DIR = Path(__file__).resolve().parents[1] / "web"
 
 
 class SyncRequest(BaseModel):
@@ -79,6 +83,7 @@ def create_app(
     app.state.database = db
     app.state.sync_service = sync
     app.state.analytics = analytics
+    app.mount("/assets", StaticFiles(directory=WEB_DIR / "assets"), name="assets")
 
     async def require_auth(
         credentials: Annotated[HTTPAuthorizationCredentials | None, Security(bearer)],
@@ -104,16 +109,9 @@ def create_app(
 
     PeriodDependency = Annotated[Period, Depends(period_dependency)]
 
-    @app.get("/")
-    async def root() -> dict[str, Any]:
-        return {
-            "service": "aiflow-conversation-analytics",
-            "version": __version__,
-            "health": "/health",
-            "ready": "/ready",
-            "docs": "/docs",
-            "api": "/api/v1/dashboard",
-        }
+    @app.get("/", response_class=FileResponse)
+    async def root() -> FileResponse:
+        return FileResponse(WEB_DIR / "index.html")
 
     @app.get("/health")
     async def health() -> dict[str, Any]:

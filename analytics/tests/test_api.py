@@ -35,6 +35,11 @@ def test_health_auth_dashboard_and_turn_detail(settings, database) -> None:
     headers = {"Authorization": f"Bearer {settings.api_token}"}
 
     with TestClient(app) as client:
+        root = client.get("/")
+        assert root.status_code == 200
+        assert "text/html" in root.headers["content-type"]
+        assert "AIFlow 对话日志监控" in root.text
+        assert client.get("/assets/app.css").status_code == 200
         assert client.get("/health").status_code == 200
         assert client.get("/ready").json()["tls_configured"] is False
         assert client.get("/api/v1/overview").status_code == 401

@@ -79,6 +79,21 @@ chmod 600 .env
 
 `start`/`restart` 会等待 `http://127.0.0.1:5090/ready`。`stop` 只操作当前 analytics 目录 PID 文件记录且所有权校验通过的进程。
 
+## Web 监控台
+
+服务根路径现在提供工作人员使用的实时监控页面：
+
+```text
+http://<服务器地址>:5090/
+```
+
+页面会自动每 30 秒刷新，也可以手动刷新或提交选定日期范围的后台 TLS 同步。首次打开时在登录框输入
+`AIFLOW_ANALYTICS_API_TOKEN` 对应的 Bearer Token；令牌只保存在当前浏览器的 `sessionStorage`，关闭浏览器后不会保留。
+页面展示任务、完成率、Token、费用、耗时、thinking 字符、工具错误率、趋势、模型/工具分布、数据质量和最近任务。
+点击最近任务可以查看该轮用户输入、模型 thinking、回复、工具调用、工具结果和终态事件的完整时间线。日志内容按纯文本展示，不会作为 HTML 执行。
+
+根路径只返回页面，不返回业务 JSON。健康检查仍使用 `/health` 和 `/ready`，接口文档使用 `/docs`；未授权访问业务 API 仍返回 `401`。
+
 ## 增量同步
 
 - 首次启动从 `AIFLOW_ANALYTICS_START_DATE` 起逐日回填。
