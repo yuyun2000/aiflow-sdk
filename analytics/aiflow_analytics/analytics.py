@@ -46,6 +46,25 @@ def _priced_tokens(tokens: int | float, price: float | None) -> float | None:
     return round(float(tokens) * price / 1_000_000, 6)
 
 
+_UNKNOWN_MODEL_NAMES = {
+    "",
+    "unknown",
+    "none",
+    "null",
+    "n/a",
+    "na",
+    "<unknown>",
+}
+
+
+def _model_name(row: dict[str, Any]) -> str:
+    for field in ("model", "primary_model", "canonical_model"):
+        value = str(row.get(field) or "").strip()
+        if value.lower() not in _UNKNOWN_MODEL_NAMES:
+            return value
+    return "unknown"
+
+
 @dataclass(frozen=True, slots=True)
 class Period:
     start_ms: int
@@ -133,12 +152,19 @@ class Analytics:
             ]
         grouped: dict[str, dict[str, int]] = {}
         for row in model_rows:
-            model = str(
-                row.get("model")
-                or row.get("canonical_model")
-                or row.get("primary_model")
-                or "unknown"
+            model = _model_name(row)
+            token_fields = (
+                "input_tokens",
+                "output_tokens",
+                "cache_read_input_tokens",
+                "cache_creation_input_tokens",
             )
+            if model == "unknown" and not any(
+                int(row.get(field) or 0) for field in token_fields
+            ):
+                # Incomplete historical turns can have no model and no usage.
+                # They must not create a fake unpriced model or block totals.
+                continue
             current = grouped.setdefault(
                 model,
                 {
@@ -225,9 +251,12 @@ class Analytics:
     def _turn_cost_fields(self, turn: dict[str, Any]) -> dict[str, Any]:
         model_rows = self.database.query(
             """
-            SELECT model, canonical_model, turn_id, input_tokens, output_tokens,
-                   cache_read_input_tokens, cache_creation_input_tokens
-            FROM turn_model_usage WHERE turn_id=?
+            SELECT m.model, m.canonical_model, m.turn_id, t.primary_model,
+                   m.input_tokens, m.output_tokens,
+                   m.cache_read_input_tokens, m.cache_creation_input_tokens
+            FROM turn_model_usage m
+            JOIN turns t ON t.turn_id=m.turn_id
+            WHERE m.turn_id=?
             """,
             (turn["turn_id"],),
         )
@@ -242,7 +271,7 @@ class Analytics:
     ) -> dict[str, Any]:
         model_rows = self.database.query(
             """
-            SELECT m.model, m.canonical_model, m.turn_id,
+            SELECT m.model, m.canonical_model, m.turn_id, t.primary_model,
                    m.input_tokens, m.output_tokens,
                    m.cache_read_input_tokens, m.cache_creation_input_tokens
             FROM turn_model_usage m

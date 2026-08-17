@@ -5,7 +5,7 @@ from zoneinfo import ZoneInfo
 
 from aiflow_analytics.analytics import Analytics, Period
 
-from .fixtures import BASE_TIME_MS, complete_turn
+from .fixtures import BASE_TIME_MS, complete_turn, event_records
 
 DAY_MS = 24 * 60 * 60 * 1000
 
@@ -159,6 +159,52 @@ def test_cost_estimates_match_models_without_cross_model_fallback(database) -> N
     assert summary["cost"]["actual_usd"] is None
     assert summary["cost"]["estimated_usd"] == 0.000193
     assert summary["cost"]["sdk_reported_usd"] == 0.3
+
+
+def test_empty_unknown_turn_does_not_block_configured_cost(database) -> None:
+    database.insert_logs(
+        complete_turn(
+            "turn-priced",
+            model="deepseek-v4-flash-ga-260731",
+            cost_usd=0.2,
+        )
+    )
+    with database.connect() as connection:
+        connection.execute(
+            "UPDATE turn_model_usage SET model=? WHERE turn_id=?",
+            ("unknown", "turn-priced"),
+        )
+    database.insert_logs(
+        event_records(
+            turn_id="turn-without-model",
+            sequence=0,
+            event_type="user_input",
+            payload={"prompt": "历史残缺记录"},
+            conversation_id="conversation-without-model",
+        )
+    )
+    analytics = Analytics(
+        database,
+        "Asia/Shanghai",
+        model_pricing={
+            "deepseek-v4-flash-ga-260731": {
+                "input": 1.0,
+                "output": 2.0,
+                "cache_read": 0.1,
+                "cache_creation": 1.0,
+            }
+        },
+    )
+
+    summary = analytics.overview(Period(BASE_TIME_MS, BASE_TIME_MS + DAY_MS))
+
+    assert summary["cost"]["pricing_complete"] is True
+    assert summary["cost"]["unpriced_models"] == []
+    assert (
+        summary["cost"]["model_estimates"][0]["model"]
+        == "deepseek-v4-flash-ga-260731"
+    )
+    assert summary["cost"]["actual_usd"] == 0.000193
 
 
 def test_period_labels_use_configured_timezone(database) -> None:

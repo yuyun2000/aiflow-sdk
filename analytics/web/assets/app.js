@@ -22,6 +22,12 @@
     if (value === null || value === undefined || Number.isNaN(Number(value))) return "--";
     return Number(value).toLocaleString("zh-CN", { maximumFractionDigits: digits });
   };
+  const tokenNumber = (value, digits = 1) => {
+    if (value === null || value === undefined || Number.isNaN(Number(value))) return "--";
+    const numeric = Number(value);
+    if (Math.abs(numeric) < 1_000_000) return number(numeric);
+    return `${(numeric / 1_000_000).toLocaleString("zh-CN", { maximumFractionDigits: digits })}M`;
+  };
   const percent = (value, digits = 1) => value === null || value === undefined ? "--" : `${(Number(value) * 100).toFixed(digits)}%`;
   const usd = (value) => value === null || value === undefined ? "--" : `$${Number(value).toFixed(4)}`;
   const usdPerMillion = (value) => value === null || value === undefined ? "未配置" : `$${Number(value).toFixed(2)} / 1M`;
@@ -148,8 +154,8 @@
     setText("metric-turns-note", `${number(volume.conversations)} 个对话 / ${number(volume.projects)} 个项目`);
     setText("metric-completion", percent(volume.completion_rate));
     setText("metric-completion-note", `${number(volume.completed)} 完成 / ${number(volume.failed)} 失败`);
-    setText("metric-tokens", number(usage.total_tokens));
-    setText("metric-tokens-note", `输入 ${number(usage.input_tokens)} / 输出 ${number(usage.output_tokens)} / 缓存读取 ${number(usage.cache_read_input_tokens)}`);
+    setText("metric-tokens", tokenNumber(usage.total_tokens));
+    setText("metric-tokens-note", `输入 ${tokenNumber(usage.input_tokens)} / 输出 ${tokenNumber(usage.output_tokens)} / 缓存读取 ${tokenNumber(usage.cache_read_input_tokens)}`);
     setText("metric-cost", usd(cost.actual_usd));
     setText("metric-cost-note", `SDK Claude计价参考 ${usd(cost.sdk_reported_usd)}`);
     setText("metric-latency", millis(latency.service_avg));
@@ -180,7 +186,7 @@
     }));
     renderBars("statuses-list", data.breakdowns?.statuses || [], (item) => ({
       name: statusLabel(item.value),
-      detail: `${number(item.tokens)} Token · 实际 ${usd(item.configured_actual_usd)}`,
+      detail: `${tokenNumber(item.tokens)} Token · 实际 ${usd(item.configured_actual_usd)}`,
       value: item.turns,
       max: item.turns,
     }));
@@ -225,7 +231,7 @@
         name.textContent = label;
         const count = document.createElement("span");
         count.className = "pricing-count";
-        count.textContent = `${number(tokenCount)} Token`;
+        count.textContent = `${tokenNumber(tokenCount)} Token`;
         const price = document.createElement("span");
         price.className = "pricing-price";
         price.textContent = `${usdPerMillion(unit)} · ${usd(estimated)}`;
@@ -425,7 +431,7 @@
       main.append(id, conversation); identity.append(main);
       const status = document.createElement("td"); const pill = document.createElement("span"); pill.className = `state-pill ${text(item.status, "").toLowerCase()}`; pill.textContent = statusLabel(item.status); status.append(pill);
       const model = document.createElement("td"); model.textContent = formatModel(item.primary_model);
-      const tokens = document.createElement("td"); tokens.className = "numeric"; tokens.textContent = number(item.total_tokens);
+      const tokens = document.createElement("td"); tokens.className = "numeric"; tokens.textContent = tokenNumber(item.total_tokens);
       const cost = document.createElement("td"); cost.className = "numeric"; cost.textContent = usd(item.configured_actual_usd);
       const duration = document.createElement("td"); duration.className = "numeric"; duration.textContent = millis(item.service_duration_ms || item.duration_ms);
       const toolCount = document.createElement("td"); toolCount.textContent = `${number(item.tool_call_count)} 次`;
@@ -455,7 +461,7 @@
     const body = $("detail-body"); body.replaceChildren();
     setText("detail-title", turn.turn_id);
     const summary = document.createElement("div"); summary.className = "detail-summary";
-    [["状态", statusLabel(turn.status)], ["模型", formatModel(turn.primary_model)], ["Token", number(turn.total_tokens)], ["实际费用", usd(turn.configured_actual_usd)], ["SDK参考", usd(turn.sdk_reported_usd)], ["服务耗时", millis(turn.service_duration_ms)], ["工具调用", number(turn.tool_call_count)]].forEach(([label, value]) => {
+    [["状态", statusLabel(turn.status)], ["模型", formatModel(turn.primary_model)], ["Token", tokenNumber(turn.total_tokens)], ["实际费用", usd(turn.configured_actual_usd)], ["SDK参考", usd(turn.sdk_reported_usd)], ["服务耗时", millis(turn.service_duration_ms)], ["工具调用", number(turn.tool_call_count)]].forEach(([label, value]) => {
       const stat = document.createElement("div"); stat.className = "detail-stat"; const name = document.createElement("span"); name.textContent = label; const val = document.createElement("strong"); val.textContent = value; stat.append(name, val); summary.append(stat);
     });
     body.append(summary);
@@ -478,7 +484,7 @@
     rows.forEach((row) => {
       const item = document.createElement("div"); item.className = `${kind}-detail-row`;
       const first = document.createElement("strong"); first.textContent = kind === "tool" ? text(row.tool_name || row.tool_type) : formatModel(row.model);
-      const second = document.createElement("span"); second.textContent = kind === "tool" ? `${row.is_error ? "错误" : "完成"} · ${millis(row.duration_ms)}` : `输入 ${number(row.input_tokens)} · 输出 ${number(row.output_tokens)} · 缓存 ${number(row.cache_read_input_tokens)}`;
+      const second = document.createElement("span"); second.textContent = kind === "tool" ? `${row.is_error ? "错误" : "完成"} · ${millis(row.duration_ms)}` : `输入 ${tokenNumber(row.input_tokens)} · 输出 ${tokenNumber(row.output_tokens)} · 缓存 ${tokenNumber(row.cache_read_input_tokens)}`;
       const third = document.createElement("span"); third.textContent = kind === "tool" ? text(row.tool_use_id) : usd(row.configured_actual_usd);
       item.append(first, second, third); section.append(item);
     });
