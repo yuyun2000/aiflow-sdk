@@ -12,6 +12,7 @@ from volcengine.tls.TLSService import TLSService
 from .config import Settings
 
 LOGGER = logging.getLogger(__name__)
+SEARCH_LOGS_MAX_LIMIT = 100
 
 
 class TLSLogClient:
@@ -37,6 +38,19 @@ class TLSLogClient:
                 timeout=self.settings.tls_timeout_seconds,
             )
         return self._client
+
+    @staticmethod
+    def _error_detail(exc: Exception) -> str:
+        error_code = getattr(exc, "error_code", None)
+        error_message = getattr(exc, "error_message", None)
+        request_id = getattr(exc, "request_id", None)
+        if error_code or error_message:
+            detail = f"{error_code or type(exc).__name__}: {error_message or ''}"
+            if request_id:
+                detail += f" (request_id={request_id})"
+        else:
+            detail = str(exc) or type(exc).__name__
+        return " ".join(detail.split())[:1000]
 
     @staticmethod
     def _identity(log: dict[str, Any]) -> str:
@@ -68,11 +82,19 @@ class TLSLogClient:
         seen_records: set[str] = set()
         logs: list[dict[str, Any]] = []
 
+        page_limit = min(self.settings.tls_page_size, SEARCH_LOGS_MAX_LIMIT)
+        if self.settings.tls_page_size > SEARCH_LOGS_MAX_LIMIT:
+            LOGGER.warning(
+                "AIFLOW_ANALYTICS_TLS_PAGE_SIZE=%d exceeds the Volcengine SDK limit; using %d",
+                self.settings.tls_page_size,
+                SEARCH_LOGS_MAX_LIMIT,
+            )
+
         for page in range(1, self.settings.tls_max_pages + 1):
             request = SearchLogsRequest(
                 topic_id=self.settings.tls_topic_id,
                 query=query or self.settings.tls_query,
-                limit=self.settings.tls_page_size,
+                limit=page_limit,
                 start_time=start_ms,
                 end_time=end_ms,
                 sort="desc",
@@ -83,7 +105,7 @@ class TLSLogClient:
             except Exception as exc:
                 self._client = None
                 raise RuntimeError(
-                    f"Volcengine TLS search failed: {type(exc).__name__}"
+                    f"Volcengine TLS search failed: {self._error_detail(exc)}"
                 ) from exc
 
             result = getattr(response, "search_result", None)

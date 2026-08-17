@@ -198,12 +198,12 @@ class SyncService:
             today = datetime.now(self.timezone).date()
             self.sync_range(start_date, today)
         except Exception as exc:
-            LOGGER.error("Initial analytics sync failed: %s", type(exc).__name__)
+            LOGGER.error("Initial analytics sync failed: %s: %s", type(exc).__name__, exc)
         while not self._stop.wait(self.settings.sync_interval_seconds):
             try:
                 self.sync_recent()
             except Exception as exc:
-                LOGGER.error("Periodic analytics sync failed: %s", type(exc).__name__)
+                LOGGER.error("Periodic analytics sync failed: %s: %s", type(exc).__name__, exc)
 
     def start(self) -> None:
         if not self.settings.sync_on_startup or not self.tls_client.configured:
@@ -235,7 +235,7 @@ class SyncService:
                 try:
                     self._sync_range_locked(start_date, end_date, force=force)
                 except Exception as exc:
-                    LOGGER.error("Manual analytics sync failed: %s", type(exc).__name__)
+                    LOGGER.error("Manual analytics sync failed: %s: %s", type(exc).__name__, exc)
                 finally:
                     self._sync_lock.release()
 

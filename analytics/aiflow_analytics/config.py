@@ -83,7 +83,8 @@ class Settings:
                 "event:aiflow_conversation_trace",
             ),
             tls_schema_version=_env_int("TLS_LOG_SCHEMA_VERSION", 2),
-            tls_page_size=_env_int("AIFLOW_ANALYTICS_TLS_PAGE_SIZE", 1000),
+            # SearchLogsV2 in the Volcengine Python SDK accepts at most 100 logs per page.
+            tls_page_size=min(_env_int("AIFLOW_ANALYTICS_TLS_PAGE_SIZE", 100), 100),
             tls_max_pages=_env_int("AIFLOW_ANALYTICS_TLS_MAX_PAGES", 10000),
             tls_timeout_seconds=_env_int("AIFLOW_ANALYTICS_TLS_TIMEOUT_SECONDS", 10),
             analytics_start_date=os.getenv("AIFLOW_ANALYTICS_START_DATE", "2026-08-01"),
@@ -110,8 +111,8 @@ class Settings:
             raise ValueError("AIFLOW_ANALYTICS_PORT must be between 1 and 65535")
         if self.tls_schema_version < 1:
             raise ValueError("TLS_LOG_SCHEMA_VERSION must be positive")
-        if not 1 <= self.tls_page_size <= 1000:
-            raise ValueError("AIFLOW_ANALYTICS_TLS_PAGE_SIZE must be between 1 and 1000")
+        if not 1 <= self.tls_page_size <= 100:
+            raise ValueError("AIFLOW_ANALYTICS_TLS_PAGE_SIZE must be between 1 and 100")
         if self.tls_max_pages < 1:
             raise ValueError("AIFLOW_ANALYTICS_TLS_MAX_PAGES must be positive")
         if self.tls_timeout_seconds < 1:

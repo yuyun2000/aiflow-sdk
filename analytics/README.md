@@ -97,6 +97,7 @@ http://<服务器地址>:5090/
 ## 增量同步
 
 - 首次启动从 `AIFLOW_ANALYTICS_START_DATE` 起逐日回填。
+- `AIFLOW_ANALYTICS_TLS_PAGE_SIZE` 应保持在 `1` 到 `100`；这是 Volcengine `SearchLogsV2` 的单页上限。旧配置写成更大的值时，客户端会自动按 `100` 请求并记录警告。
 - 已完成历史日写入 `sync_days`，默认不重复拉取。
 - 当天每 `AIFLOW_ANALYTICS_SYNC_INTERVAL_SECONDS` 秒同步，并向前重叠 `AIFLOW_ANALYTICS_SYNC_OVERLAP_MINUTES` 分钟。
 - 重叠、分页重复和超时重发均由 `record_id` 幂等处理。

@@ -21,7 +21,7 @@ def settings(tmp_path):
         tls_secret_key="fake-read-secret-key",
         tls_query="event:aiflow_conversation_trace",
         tls_schema_version=2,
-        tls_page_size=1000,
+        tls_page_size=100,
         tls_max_pages=10,
         tls_timeout_seconds=1,
         analytics_start_date="2026-08-01",
