@@ -19,7 +19,7 @@ If `AIFLOW_CONFIG` and `--config` are absent, the CLI reads `.aiflow/config.json
 
 ```json
 {
-  "baseUrl": "https://ai-flow.m5stack.com/",
+  "baseUrl": "https://uiflow2.m5stack.com/m5stack/",
   "clientId": "client-123",
   "timeout": 120,
   "defaultDeviceId": "device-123"

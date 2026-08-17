@@ -30,6 +30,7 @@ from fastapi.staticfiles import StaticFiles
 
 from . import __version__
 from .agent import ClaudeRunner, _event_secrets, _sanitize_event
+from .asr import AsrError, SaucAsrClient
 from .config import Settings, load_settings
 from .device_push import DeploymentError, DevicePusher
 from .schemas import (
@@ -117,6 +118,7 @@ def create_app(
     *,
     runner: ClaudeRunner | None = None,
     pusher: DevicePusher | None = None,
+    asr_client: SaucAsrClient | None = None,
 ) -> FastAPI:
     configured = settings or load_settings()
     telemetry = TlsTelemetry(configured.tls_logging, configured.database_path)
@@ -129,6 +131,7 @@ def create_app(
     workspaces = WorkspaceManager(configured)
     effective_runner = runner or ClaudeRunner(configured, workspaces)
     effective_pusher = pusher or DevicePusher(configured, workspaces)
+    effective_asr_client = asr_client or SaucAsrClient(configured.asr)
     tasks = TaskManager(
         configured,
         storage,
@@ -161,6 +164,7 @@ def create_app(
     app.state.pusher = effective_pusher
     app.state.client_auth = client_auth
     app.state.telemetry = telemetry
+    app.state.asr_client = effective_asr_client
 
     @app.middleware("http")
     async def authenticate_official_client(request: Request, call_next):
@@ -272,8 +276,93 @@ def create_app(
                 "device_client_id_binding",
                 "bounded_task_queue",
                 "base64_image_audio_messages",
+                "sauc_nostream_asr",
+                "sauc_nostream_asr_stream_upload",
             ],
         }
+
+    @app.post("/api/v3/asr")
+    async def asr_endpoint(
+        file: Annotated[UploadFile, File(description="WAV audio, mono or stereo")],
+        language: Annotated[str | None, Form()] = None,
+        enable_punc: Annotated[bool, Form()] = True,
+        enable_itn: Annotated[bool, Form()] = True,
+        enable_ddc: Annotated[bool, Form()] = True,
+        show_utterances: Annotated[bool, Form()] = True,
+        context: dict[str, Any] = Depends(require_context),
+    ) -> dict[str, Any]:
+        del context
+        filename = file.filename or "audio.wav"
+        if not filename.lower().endswith(".wav"):
+            raise HTTPException(status_code=400, detail={"code": "invalid_audio", "message": "ASR currently accepts WAV audio only"})
+        if file.content_type and file.content_type not in {"audio/wav", "audio/x-wav", "audio/wave", "application/octet-stream"}:
+            raise HTTPException(status_code=400, detail={"code": "invalid_audio", "message": "audio content type must be audio/wav"})
+        audio = await file.read(configured.max_upload_bytes + 1)
+        await file.close()
+        if not audio:
+            raise HTTPException(status_code=400, detail={"code": "empty_file", "message": "audio file must not be empty"})
+        if len(audio) > configured.max_upload_bytes:
+            raise HTTPException(status_code=413, detail={"code": "file_too_large", "message": "audio file exceeds configured upload limit"})
+        try:
+            return await effective_asr_client.transcribe(
+                audio,
+                filename=filename,
+                language=language.strip() if language and language.strip() else None,
+                enable_punc=enable_punc,
+                enable_itn=enable_itn,
+                enable_ddc=enable_ddc,
+                show_utterances=show_utterances,
+            )
+        except AsrError as exc:
+            raise HTTPException(status_code=exc.status_code, detail={"code": exc.code, "message": str(exc)}) from exc
+
+    @app.post("/api/v3/asr/stream")
+    async def asr_stream_endpoint(
+        request: Request,
+        format: Annotated[str, Query()] = "pcm",
+        rate: Annotated[int, Query(ge=8000, le=48000)] = 16000,
+        bits: Annotated[int, Query()] = 16,
+        channel: Annotated[int, Query(ge=1, le=2)] = 1,
+        language: Annotated[str | None, Query()] = None,
+        enable_punc: Annotated[bool, Query()] = True,
+        enable_itn: Annotated[bool, Query()] = True,
+        enable_ddc: Annotated[bool, Query()] = True,
+        show_utterances: Annotated[bool, Query()] = True,
+        context: dict[str, Any] = Depends(require_context),
+    ) -> dict[str, Any]:
+        del context
+        normalized_format = format.strip().lower()
+        if normalized_format != "pcm":
+            raise HTTPException(
+                status_code=400,
+                detail={"code": "invalid_audio", "message": "streaming ASR accepts raw PCM; send format=pcm"},
+            )
+        if request.headers.get("content-type", "").split(";", 1)[0].lower() not in {
+            "audio/pcm", "application/octet-stream", "audio/raw", "",
+        }:
+            raise HTTPException(status_code=400, detail={"code": "invalid_audio", "message": "streaming ASR content type must be audio/pcm"})
+
+        total = 0
+
+        async def bounded_chunks():
+            nonlocal total
+            async for chunk in request.stream():
+                total += len(chunk)
+                if total > configured.max_upload_bytes:
+                    raise AsrError("audio stream exceeds configured upload limit", code="file_too_large", status_code=413)
+                if chunk:
+                    yield chunk
+
+        try:
+            return await effective_asr_client.transcribe_stream(
+                bounded_chunks(), channels=channel, bits=bits, rate=rate,
+                audio_format="pcm",
+                language=language.strip() if language and language.strip() else None,
+                enable_punc=enable_punc, enable_itn=enable_itn, enable_ddc=enable_ddc,
+                show_utterances=show_utterances,
+            )
+        except AsrError as exc:
+            raise HTTPException(status_code=exc.status_code, detail={"code": exc.code, "message": str(exc)}) from exc
 
     @app.get("/api/v3/system/status")
     async def system_status_endpoint() -> dict[str, Any]:

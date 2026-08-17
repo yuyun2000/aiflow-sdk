@@ -88,6 +88,41 @@ async function getSystemStatus() {
 
 ## 4. Base64 图片和语音
 
+需要把语音先转成一句文本时，调用独立 ASR 路由：
+
+```js
+async function transcribeWav(file, token) {
+  const body = new FormData();
+  body.append("file", file, file.name);
+  body.append("language", "zh-CN");
+  const response = await fetch(`${API_BASE}/api/v3/asr`, {
+    method: "POST",
+    headers: { "X-AIFlow-Context-Token": token },
+    body,
+  });
+  if (!response.ok) throw new Error((await response.json()).detail?.message || "ASR failed");
+  return (await response.json()).text;
+}
+```
+
+该路由当前接收 WAV 并返回完整句子，不是实时增量 SSE；火山引擎 API Key 由 AIFlow 服务端配置，浏览器不得读取或拼接提供方 WebSocket 请求。
+
+ESP32 等边录边传的客户端使用原始 PCM 流式接口：
+
+```js
+const response = await fetch(`${API_BASE}/api/v3/asr/stream?format=pcm&rate=16000&bits=16&channel=1`, {
+  method: "POST",
+  headers: {
+    "Content-Type": "audio/pcm",
+    "X-AIFlow-Context-Token": token,
+  },
+  body: readablePcmStream,
+});
+const result = await response.json();
+```
+
+ESP32 应按录音硬件的采样率、位深和声道传查询参数，并在停止录音时关闭 request body；服务端不要求客户端保存完整音频。
+
 前端把 `File` 转为原始 Base64，不发送 `data:<mime>;base64,` 前缀：
 
 ```js

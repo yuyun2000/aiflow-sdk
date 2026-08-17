@@ -252,6 +252,7 @@ Claude Code SDK 会继承服务进程环境。当前服务显式用 `AIFLOW_CLAU
 - `max_concurrent_tasks`：同时真正执行的 Claude Coding 或直接部署任务数。
 - `max_queued_tasks`：并发槽满后仍可等待的任务数。
 - `GET /api/v3/system/status`：实时返回会话容量、运行数和排队数，不包含设备标识。
+- `POST /api/v3/asr`：服务端代理火山引擎 SAUC 非流式语音识别，上传 WAV 后返回整句文本；`POST /api/v3/asr/stream` 接受 ESP32 可边录边传的原始 PCM 流。配置和错误码见 [API_V3.md](docs/API_V3.md)。
 - 新设备容量满返回 `503 session_capacity_full`；任务总容量满返回 `429 task_queue_full`。
 
 当前限制器支持单个服务进程内的多设备并发，并保持同一设备同时最多一个任务。不要启动多个 Uvicorn worker；多进程或多实例会各自拥有独立信号量，需要先将调度迁移到 Redis/外部队列。

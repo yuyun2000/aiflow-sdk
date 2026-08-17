@@ -38,7 +38,7 @@ class RecordingPushHandler(BaseHTTPRequestHandler):
         if self.server.fail_path and parsed.path == self.server.fail_path:
             self._json_response(503, {"message": "temporary failure for device-test-123"})
             return
-        if parsed.path == "/api/v1/localFiles/upload-resource-batch-and-push":
+        if parsed.path == self.server.path_prefix + "/api/v1/localFiles/upload-resource-batch-and-push":
             self._json_response(
                 200,
                 {
@@ -51,7 +51,7 @@ class RecordingPushHandler(BaseHTTPRequestHandler):
                 },
             )
             return
-        if parsed.path == "/api/v1/device/push-code/device-test-123":
+        if parsed.path == self.server.path_prefix + "/api/v1/device/push-code/device-test-123":
             self._json_response(200, {"deviceId": "device-test-123", "chunkCount": 2})
             return
         self._json_response(404, {"message": "not found"})
@@ -70,15 +70,16 @@ class RecordingPushHandler(BaseHTTPRequestHandler):
 
 
 @contextmanager
-def push_server(*, fail_path: str | None = None):
+def push_server(*, fail_path: str | None = None, path_prefix: str = ""):
     server = ThreadingHTTPServer(("127.0.0.1", 0), RecordingPushHandler)
     server.requests = []
     server.fail_path = fail_path
+    server.path_prefix = path_prefix
     thread = Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
         host, port = server.server_address
-        yield server, f"http://{host}:{port}"
+        yield server, f"http://{host}:{port}{path_prefix}"
     finally:
         server.shutdown()
         server.server_close()
@@ -166,6 +167,18 @@ def test_device_pusher_preserves_http_contract_and_order(tmp_path):
     ]
     assert code_request["headers"]["Content-Type"] == "text/plain; charset=UTF-8"
     assert code_request["body"] == code_bytes
+    assert [step["action"] for step in result["steps"]] == ["push-resources", "push-code"]
+
+
+def test_device_pusher_preserves_base_url_path_prefix(tmp_path):
+    with push_server(path_prefix="/m5stack") as (server, base_url):
+        pusher, context, _ = make_pusher(tmp_path, base_url)
+        result = asyncio.run(pusher.deploy(context))
+
+    assert [urlsplit(item["path"]).path for item in server.requests] == [
+        "/m5stack/api/v1/localFiles/upload-resource-batch-and-push",
+        "/m5stack/api/v1/device/push-code/device-test-123",
+    ]
     assert [step["action"] for step in result["steps"]] == ["push-resources", "push-code"]
 
 
