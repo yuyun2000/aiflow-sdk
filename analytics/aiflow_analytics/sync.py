@@ -192,14 +192,34 @@ class SyncService:
             end_label=now.isoformat(),
         )
 
+    def _sync_missing_history(self, start_date: date, today: date) -> None:
+        """Retry only missing clean days before today, without touching completed days."""
+        end_date = today - timedelta(days=1)
+        if start_date > end_date:
+            return
+        if not self.database.historical_sync_needed(start_date.isoformat(), end_date.isoformat()):
+            return
+        self.sync_range(start_date, end_date)
+
     def _initial_and_periodic_loop(self) -> None:
+        start_date = date.fromisoformat(self.settings.analytics_start_date)
         try:
-            start_date = date.fromisoformat(self.settings.analytics_start_date)
             today = datetime.now(self.timezone).date()
+            # The current day is intentionally included once at startup and is never
+            # marked in sync_days, so every service restart refreshes today's window.
             self.sync_range(start_date, today)
         except Exception as exc:
             LOGGER.error("Initial analytics sync failed: %s: %s", type(exc).__name__, exc)
         while not self._stop.wait(self.settings.sync_interval_seconds):
+            today = datetime.now(self.timezone).date()
+            try:
+                self._sync_missing_history(start_date, today)
+            except Exception as exc:
+                LOGGER.error(
+                    "Historical analytics sync failed: %s: %s",
+                    type(exc).__name__,
+                    exc,
+                )
             try:
                 self.sync_recent()
             except Exception as exc:
@@ -259,11 +279,17 @@ class SyncService:
             self._manual_thread.join(timeout=2)
 
     def status(self) -> dict[str, Any]:
+        start_date = date.fromisoformat(self.settings.analytics_start_date)
+        today = datetime.now(self.timezone).date()
+        historical_end = today - timedelta(days=1)
         return {
             "tls_configured": self.tls_client.configured,
             "periodic_running": bool(
                 self._periodic_thread and self._periodic_thread.is_alive()
             ),
             "active": dict(self._active) if self._active else None,
+            "historical_sync_needed": self.database.historical_sync_needed(
+                start_date.isoformat(), historical_end.isoformat()
+            ),
             **self.database.sync_status(),
         }

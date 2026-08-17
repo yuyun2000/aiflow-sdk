@@ -73,3 +73,30 @@ def test_malformed_trace_is_retained_as_ingest_error(database) -> None:
     error = database.query_one("SELECT * FROM ingest_errors")
     assert error is not None
     assert error["error_type"] == "record_parse"
+
+
+def test_historical_sync_needed_tracks_clean_completed_days(database) -> None:
+    assert database.historical_sync_needed("2026-08-01", "2026-08-03") is True
+
+    database.mark_day_synced(
+        "2026-08-01",
+        {"fetched": 1, "inserted": 1, "assembled": 1, "errors": 0},
+    )
+    database.mark_day_synced(
+        "2026-08-02",
+        {"fetched": 0, "inserted": 0, "assembled": 0, "errors": 1},
+    )
+    database.mark_day_synced(
+        "2026-08-03",
+        {"fetched": 1, "inserted": 1, "assembled": 1, "errors": 0},
+    )
+
+    assert database.day_is_synced("2026-08-01") is True
+    assert database.day_is_synced("2026-08-02") is False
+    assert database.historical_sync_needed("2026-08-01", "2026-08-03") is True
+
+    database.mark_day_synced(
+        "2026-08-02",
+        {"fetched": 1, "inserted": 1, "assembled": 1, "errors": 0},
+    )
+    assert database.historical_sync_needed("2026-08-01", "2026-08-03") is False

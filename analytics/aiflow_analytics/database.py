@@ -841,9 +841,30 @@ class Database:
 
     def day_is_synced(self, event_date: str) -> bool:
         return (
-            self.query_one("SELECT 1 FROM sync_days WHERE event_date=?", (event_date,))
+            self.query_one(
+                "SELECT 1 FROM sync_days WHERE event_date=? AND error_count=0",
+                (event_date,),
+            )
             is not None
         )
+
+    def historical_sync_needed(self, start_date: str, end_date: str) -> bool:
+        """Return whether any day in an inclusive historical range lacks a clean sync marker."""
+        if start_date > end_date:
+            return False
+        expected_days = (
+            datetime.fromisoformat(end_date).date()
+            - datetime.fromisoformat(start_date).date()
+        ).days + 1
+        row = self.query_one(
+            """
+            SELECT COUNT(*) AS count
+            FROM sync_days
+            WHERE event_date>=? AND event_date<=? AND error_count=0
+            """,
+            (start_date, end_date),
+        )
+        return int(row["count"] if row else 0) < expected_days
 
     def start_sync_run(self, start_date: str, end_date: str) -> int:
         with self._write_lock, self.connect() as connection:

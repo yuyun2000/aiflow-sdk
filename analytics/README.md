@@ -98,7 +98,8 @@ http://<服务器地址>:5090/
 
 - 首次启动从 `AIFLOW_ANALYTICS_START_DATE` 起逐日回填。
 - `AIFLOW_ANALYTICS_TLS_PAGE_SIZE` 应保持在 `1` 到 `100`；这是 Volcengine `SearchLogsV2` 的单页上限。旧配置写成更大的值时，客户端会自动按 `100` 请求并记录警告。
-- 已完成历史日写入 `sync_days`，默认不重复拉取。
+- 已成功完成的历史日写入 `sync_days`，默认不重复拉取；缺少成功标记或上次有解析错误的日期会在后续周期自动重试。
+- 每次服务启动都会重新拉取启动日的当天窗口；当天不会写入 `sync_days`，所以重启后仍会刷新当天日志。启动历史回填失败后，周期任务会先补齐历史缺口，再同步最近窗口，不需要再次手动删除数据库。
 - 当天每 `AIFLOW_ANALYTICS_SYNC_INTERVAL_SECONDS` 秒同步，并向前重叠 `AIFLOW_ANALYTICS_SYNC_OVERLAP_MINUTES` 分钟。
 - 重叠、分页重复和超时重发均由 `record_id` 幂等处理。
 - `POST /api/v1/sync` 只启动后台线程；同一时间只允许一个同步任务。
@@ -131,6 +132,8 @@ Authorization: Bearer <AIFLOW_ANALYTICS_API_TOKEN>
 | `GET /api/v1/turns` | 按状态、项目、conversation、模型、工具筛选 |
 | `GET /api/v1/turns/{turn_id}` | 完整逻辑事件、工具与模型用量时间线 |
 | `GET /api/v1/data-quality` | 分块、解析、终态、partial 和工具配对质量 |
+
+`GET /api/v1/status` 的 `sync.historical_sync_needed=true` 表示开始日期到昨天仍有未成功回填的日期；后台周期任务会自动重试这些日期。当天不写入 `sync_days`，每次服务启动都会重新拉取当天窗口。
 
 ```bash
 curl -H "Authorization: Bearer $AIFLOW_ANALYTICS_API_TOKEN" \

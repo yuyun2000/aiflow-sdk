@@ -437,6 +437,7 @@
     const sync = status.sync || {};
     const latest = sync.latest_run || {};
     if (sync.active) { setText("sync-label", `同步状态：进行中（${text(sync.active.current_date || sync.active.start)}）`); }
+    else if (sync.historical_sync_needed) { setText("sync-label", "同步状态：等待补齐历史日志"); }
     else if (latest.status === "failed") { setText("sync-label", `同步状态：上次失败（${text(latest.error, "未知原因")}）`); }
     else if (latest.status === "completed") { setText("sync-label", "同步状态：已完成"); }
     else { setText("sync-label", sync.tls_configured ? "同步状态：等待计划任务" : "同步状态：TLS 未配置"); }

@@ -21,7 +21,11 @@ class PassiveSync:
         pass
 
     def status(self):
-        return {"active": None, "tls_configured": False}
+        return {
+            "active": None,
+            "tls_configured": False,
+            "historical_sync_needed": True,
+        }
 
 
 def test_health_auth_dashboard_and_turn_detail(settings, database) -> None:
@@ -42,8 +46,10 @@ def test_health_auth_dashboard_and_turn_detail(settings, database) -> None:
         assert client.get("/assets/app.css").status_code == 200
         assert client.get("/health").status_code == 200
         assert client.get("/ready").json()["tls_configured"] is False
-        status_config = client.get("/api/v1/status", headers=headers).json()["config"]
+        status_payload = client.get("/api/v1/status", headers=headers).json()
+        status_config = status_payload["config"]
         assert status_config["tls_page_size"] == 100
+        assert status_payload["sync"]["historical_sync_needed"] is True
         assert client.get("/api/v1/overview").status_code == 401
         overview = client.get(
             "/api/v1/overview?start_date=2026-08-06&end_date=2026-08-06",
