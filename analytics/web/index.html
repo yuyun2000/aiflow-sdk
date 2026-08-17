@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <meta name="description" content="AIFlow 对话日志实时监控台">
+  <title>AIFlow 对话日志监控</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+  <header class="app-header">
+    <div class="header-inner">
+      <a class="brand" href="/" aria-label="AIFlow 对话日志监控首页">
+        <span class="brand-mark">AI</span>
+        <span class="brand-copy"><strong>AIFlow 对话日志</strong><small>Conversation analytics</small></span>
+      </a>
+      <div class="header-meta">
+        <span id="service-state" class="status-badge pending"><i class="status-dot"></i><span>连接中</span></span>
+        <span class="updated-label" id="last-updated">尚未刷新</span>
+        <button class="icon-button" id="refresh-button" type="button" title="刷新数据" aria-label="刷新数据">↻</button>
+        <button class="icon-button" id="logout-button" type="button" title="清除访问令牌" aria-label="清除访问令牌">⇥</button>
+      </div>
+    </div>
+  </header>
+
+  <main class="page-shell">
+    <section class="toolbar" aria-label="筛选和同步控制">
+      <div class="toolbar-group">
+        <span class="eyebrow">监控范围</span>
+        <div class="segmented" id="range-presets" role="group" aria-label="快捷日期范围">
+          <button type="button" data-days="1">24 小时</button>
+          <button type="button" data-days="7" class="active">7 天</button>
+          <button type="button" data-days="30">30 天</button>
+        </div>
+        <label class="date-field">开始<input id="start-date" type="date"></label>
+        <span class="date-separator">至</span>
+        <label class="date-field">结束<input id="end-date" type="date"></label>
+      </div>
+      <div class="toolbar-group toolbar-actions">
+        <span class="refresh-copy"><span class="pulse-dot"></span>每 30 秒自动刷新</span>
+        <button class="button secondary" id="sync-button" type="button"><span aria-hidden="true">⇵</span> 同步日志</button>
+      </div>
+    </section>
+
+    <section class="page-heading">
+      <div>
+        <p class="eyebrow">OPERATIONS / LIVE VIEW</p>
+        <h1>系统状态总览</h1>
+        <p class="heading-note" id="range-label">正在读取数据范围</p>
+      </div>
+      <div class="heading-status">
+        <span id="sync-label">同步状态：检查中</span>
+        <span id="sync-time">最后同步：--</span>
+      </div>
+    </section>
+
+    <section class="metric-grid" aria-label="核心指标">
+      <article class="metric-card accent-teal"><span>任务数</span><strong id="metric-turns">--</strong><small id="metric-turns-note">-- 个对话</small></article>
+      <article class="metric-card accent-blue"><span>完成率</span><strong id="metric-completion">--</strong><small id="metric-completion-note">-- 完成 / -- 失败</small></article>
+      <article class="metric-card accent-violet"><span>总 Token</span><strong id="metric-tokens">--</strong><small id="metric-tokens-note">输入 -- / 输出 -- / 缓存读取 --</small></article>
+      <article class="metric-card accent-coral"><span>总费用</span><strong id="metric-cost">--</strong><small id="metric-cost-note">单任务 --</small></article>
+      <article class="metric-card accent-amber"><span>平均服务耗时</span><strong id="metric-latency">--</strong><small id="metric-latency-note">P95 --</small></article>
+      <article class="metric-card accent-slate"><span>工具错误率</span><strong id="metric-tool-errors">--</strong><small id="metric-tool-errors-note">-- 次调用 / -- 次错误</small></article>
+      <article class="metric-card accent-indigo"><span>Thinking 字符</span><strong id="metric-thinking">--</strong><small id="metric-thinking-note">回复字符 --</small></article>
+      <article class="metric-card accent-green"><span>日志完整度</span><strong id="metric-quality">--</strong><small id="metric-quality-note">-- 个物理记录</small></article>
+    </section>
+
+    <section class="dashboard-grid trend-grid">
+      <article class="panel chart-panel panel-wide">
+        <div class="panel-heading">
+          <div><h2>使用趋势</h2><p>任务量、Token 和工具调用按时间聚合</p></div>
+          <label class="select-label">粒度<select id="bucket-select"><option value="day">按天</option><option value="hour">按小时</option><option value="week">按周</option></select></label>
+        </div>
+        <div class="chart-legend"><span><i class="legend-key key-teal"></i>任务数</span><span><i class="legend-key key-blue"></i>Token（千）</span><span><i class="legend-key key-coral"></i>工具调用</span></div>
+        <div class="chart-wrap"><canvas id="trend-chart" aria-label="使用趋势图"></canvas><div class="chart-empty" id="trend-empty" hidden>当前范围暂无数据</div></div>
+      </article>
+      <article class="panel health-panel">
+        <div class="panel-heading"><div><h2>服务健康</h2><p>数据链路和任务终态</p></div><span class="live-mark"><i></i>LIVE</span></div>
+        <div class="health-ring-wrap"><div class="health-ring" id="health-ring"><strong id="health-ring-value">--</strong><span>完成率</span></div><div class="health-legend" id="health-legend"></div></div>
+        <div class="health-stats"><div><span>API P95</span><strong id="api-p95">--</strong></div><div><span>队列平均</span><strong id="queue-avg">--</strong></div><div><span>部署成功率</span><strong id="deploy-rate">--</strong></div></div>
+      </article>
+    </section>
+
+    <section class="dashboard-grid split-grid">
+      <article class="panel">
+        <div class="panel-heading"><div><h2>模型用量</h2><p>Token、成本和任务分布</p></div></div>
+        <div class="bar-list" id="models-list"></div>
+      </article>
+      <article class="panel pricing-panel">
+        <div class="panel-heading"><div><h2>费用与计费</h2><p>实际花费按 model_pricing.json 的模型单价计算，SDK 价格仅作参考</p></div><span id="pricing-badge" class="small-badge">读取中</span></div>
+        <div class="pricing-list" id="pricing-list"></div>
+        <div class="pricing-actual"><span>实际花费（按模型价格）</span><strong id="actual-cost">--</strong><small id="actual-cost-note">来源：model_pricing.json</small></div>
+      </article>
+      <article class="panel">
+        <div class="panel-heading"><div><h2>工具调用</h2><p>完成、错误和平均耗时</p></div></div>
+        <div class="bar-list" id="tools-list"></div>
+      </article>
+      <article class="panel">
+        <div class="panel-heading"><div><h2>任务状态</h2><p>当前筛选范围内的终态分布</p></div></div>
+        <div class="bar-list" id="statuses-list"></div>
+      </article>
+      <article class="panel quality-panel">
+        <div class="panel-heading"><div><h2>数据质量</h2><p>同步和重建链路的完整度</p></div><span id="quality-badge" class="small-badge">检查中</span></div>
+        <div class="quality-list" id="quality-list"></div>
+      </article>
+    </section>
+
+    <section class="panel turns-panel">
+      <div class="panel-heading turns-heading"><div><h2>最近任务</h2><p>点击任务查看用户输入、thinking、回复和工具时间线</p></div><span id="turns-count" class="muted-caption">--</span></div>
+      <div class="table-scroll"><table><thead><tr><th>任务 / 对话</th><th>状态</th><th>模型</th><th class="numeric">Token</th><th class="numeric">费用</th><th class="numeric">耗时</th><th>工具</th><th>更新时间</th></tr></thead><tbody id="turns-table"></tbody></table></div>
+      <div class="table-footer"><span id="turns-page-label">--</span><div><button class="button small secondary" id="turns-prev" type="button">上一页</button><button class="button small secondary" id="turns-next" type="button">下一页</button></div></div>
+    </section>
+  </main>
+
+  <div class="overlay" id="login-layer" hidden>
+    <form class="dialog login-dialog" id="login-form">
+      <span class="brand-mark large">AI</span>
+      <p class="eyebrow">SECURE CONSOLE</p>
+      <h2>进入日志监控台</h2>
+      <p class="dialog-copy">请输入服务端配置的 API Token。令牌仅保存在当前浏览器会话中。</p>
+      <label class="form-label">API Token<input id="token-input" type="password" autocomplete="current-password" spellcheck="false" required></label>
+      <p class="form-error" id="login-error" role="alert"></p>
+      <button class="button primary" type="submit">验证并进入</button>
+    </form>
+  </div>
+
+  <aside class="drawer" id="detail-drawer" aria-hidden="true" aria-labelledby="detail-title">
+    <div class="drawer-header"><div><p class="eyebrow">TURN DETAIL</p><h2 id="detail-title">任务详情</h2></div><button class="icon-button" id="drawer-close" type="button" title="关闭详情" aria-label="关闭详情">×</button></div>
+    <div class="drawer-body" id="detail-body"><div class="detail-loading">选择任务后加载完整事件</div></div>
+  </aside>
+  <div class="drawer-backdrop" id="drawer-backdrop" hidden></div>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <script src="/assets/app.js"></script>
+</body>
+</html>

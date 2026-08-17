@@ -341,6 +341,7 @@ Agent 或客户端可在工作区创建 `.aiflow/deploy.json`：
 - [API_V3.md](docs/API_V3.md)：完整接口协议、容量状态和多模态消息格式。
 - [CLIENT_SECURITY.md](docs/CLIENT_SECURITY.md)：匿名 Web BFF、内部签名、防重放、费用限额和 Agent 事件脱敏。
 - [CONVERSATION_LOGGING.md](docs/CONVERSATION_LOGGING.md)：TLS 对话事件 schema、可靠上传、隐私边界和多轮重建。
+- [analytics/README.md](analytics/README.md)：独立 TLS 拉取、复杂统计、趋势对比和单轮时间线后端。
 - [WEB_CLIENT_INTEGRATION.md](docs/WEB_CLIENT_INTEGRATION.md)：网页端对接流程与 JavaScript 示例。
 - [THIRD_PARTY_DEVICE_PUSH_API.md](docs/THIRD_PARTY_DEVICE_PUSH_API.md)：底层设备推送接口语义。
 - [V2_MIGRATION.md](docs/legacy/V2_MIGRATION.md)：V2 到 V3 迁移说明。
