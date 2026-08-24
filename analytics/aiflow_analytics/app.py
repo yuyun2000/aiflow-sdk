@@ -227,6 +227,32 @@ def create_app(
             project_id=project_id,
         )
 
+    @app.get("/api/v1/devices", dependencies=[Depends(require_auth)])
+    async def devices(
+        period: PeriodDependency,
+        page: int = Query(default=1, ge=1),
+        page_size: int = Query(default=20, ge=1, le=200),
+    ) -> dict[str, Any]:
+        return await asyncio.to_thread(
+            analytics.devices,
+            period,
+            page=page,
+            page_size=page_size,
+        )
+
+    @app.get("/api/v1/activity", dependencies=[Depends(require_auth)])
+    async def recent_activity(
+        period: PeriodDependency,
+        page: int = Query(default=1, ge=1),
+        page_size: int = Query(default=12, ge=1, le=50),
+    ) -> dict[str, Any]:
+        return await asyncio.to_thread(
+            analytics.recent_activity,
+            period,
+            page=page,
+            page_size=page_size,
+        )
+
     @app.get("/api/v1/turns", dependencies=[Depends(require_auth)])
     async def turns(
         period: PeriodDependency,

@@ -9,16 +9,21 @@
 1. `raw_records` 按 `record_id` 保存 TLS 物理记录，天然幂等。
 2. `events` 按 `event_id` 检查 `chunk_index=0..chunk_count-1` 后拼接 JSON；缺块时不制造半条事件。
 3. `turns`、`tool_calls`、`turn_model_usage` 按 `turn_id` 重建任务状态、内容量、token、费用、耗时、模型和工具链。
-4. API 按 `conversation_id`、`project_id`、时间范围聚合，不返回原始设备 ID 或 client ID。
+4. 顶层非空 `mac_address` 会规范化后贯通到上述三层，用于受 Bearer Token 保护的设备统计；缺失或空 MAC 的旧日志不进入设备口径。
+5. API 按 `conversation_id`、`project_id`、`mac_address` 和时间范围聚合，不返回 `device_id` 或 `client_id`。
+
+分析库启动时会为旧数据库非破坏性补充 MAC 列，并从 `raw_records.raw_json` 回填已经同步过的非空 MAC，不要求重新拉取 TLS。常见的裸 12 位、冒号、短横线和点分 MAC 会统一为大写冒号格式。
 
 物理 TLS 链路是 at-least-once，分析库以 `record_id` 去重。`event_sequence` 空档是正常的，因为高频 delta 和结构事件本来就不上传 TLS。
 
 ## 统计能力
 
 - 任务、对话、项目量，完成率、失败率、取消与不完整任务。
-- input/output/cache token、token/turn、输出输入比。
+- 周期设备数，以及逐设备的项目、会话、任务终态、Token、缓存命中率、费用、工具调用和最近活动。
+- 未缓存输入、缓存读取、缓存写入、输出和含缓存总 Token，token/turn、输出输入比。
+- 整体及逐模型缓存命中率；分母为未缓存输入、缓存读取和缓存写入之和。
 - 输入、输出、缓存读取/写入 token 数，以及按配置单价估算的分类费用。
-- SDK Claude 计价参考、按模型价格计算的实际总费用、单任务费用、成功任务费用、每千 token 费用。
+- SDK Claude 计价参考、按模型价格计算的实际总费用、平均单任务/单会话费用、成功任务费用、每千 token 费用。
 - Agent/API/排队/服务总耗时的平均值、P50、P95。
 - thinking/回复块和字符量、thinking/output 比、partial 数量。
 - 工具调用、结果、错误率、平均/P95 耗时、孤立调用与结果。
@@ -36,6 +41,10 @@
 
 - `input_tokens`、`output_tokens`、`cache_read_input_tokens`、
   `cache_creation_input_tokens` 来自 `ResultMessage.usage`。
+- `input_tokens` 是未缓存输入；缓存读取和缓存写入是另外两类输入。
+  `input_tokens_including_cache` 为三类输入之和，`total_tokens` 再加上输出 Token。
+  分析库启动时会自动把旧版 `input + output` 口径的 `total_tokens` 修正为含缓存口径。
+- `cache_hit_rate = cache_read_input_tokens / input_tokens_including_cache`；分母为零时返回空值。
 - `total_cost_usd` 来自 `ResultMessage.total_cost_usd`；第三方模型未返回时保留为空，
   分析服务不按公开价猜测实际账单。
 - API 的 `cost.sdk_reported_usd` 是上面 SDK 字段的聚合，仅作为“SDK Claude 计价参考”。
@@ -122,8 +131,9 @@ http://<服务器地址>:5090/
 
 页面会自动每 30 秒刷新，也可以手动刷新或提交选定日期范围的后台 TLS 同步。首次打开时在登录框输入
 `AIFLOW_ANALYTICS_API_TOKEN` 对应的 Bearer Token；令牌只保存在当前浏览器的 `sessionStorage`，关闭浏览器后不会保留。
-页面展示任务、完成率、输入/输出/缓存 Token、分类计费估算、按模型价格计算的实际费用、SDK Claude 计价参考、耗时、thinking 字符、工具错误率、趋势、模型/工具分布、数据质量和最近任务。
-点击最近任务可以查看该轮用户输入、模型 thinking、回复、工具调用、工具结果和终态事件的完整时间线。日志内容按纯文本展示，不会作为 HTML 执行。
+页面展示任务、设备、平均会话深度、完成率、含缓存总 Token、整体及逐模型缓存命中率、分类计费估算、实际总费用、平均任务/会话费用、SDK Claude 计价参考、耗时、工具错误率、趋势、模型/工具分布和数据质量。
+设备统计独立分页，只统计当前周期内 `mac_address` 非空的任务，并展示每台设备的会话、任务、Token、缓存、费用和最近活动。
+最近活动按项目和会话分组，会话内任务按时间正序排列并直接突出用户消息。点击任务后，用户消息保持展开，模型 thinking、回复、工具、结果和模型用量默认折叠；日志内容按纯文本展示，不会作为 HTML 执行。
 
 根路径只返回页面，不返回业务 JSON。健康检查仍使用 `/health` 和 `/ready`，接口文档使用 `/docs`；未授权访问业务 API 仍返回 `401`。
 
@@ -161,7 +171,9 @@ Authorization: Bearer <AIFLOW_ANALYTICS_API_TOKEN>
 | `GET /api/v1/trends?bucket=day` | 小时/日/周趋势 |
 | `GET /api/v1/breakdowns` | 模型、工具、状态、原因、项目分解 |
 | `GET /api/v1/dashboard` | 一次返回总览、对比、趋势、分解和质量 |
+| `GET /api/v1/devices` | 非空 MAC 设备的周期用量聚合与分页 |
 | `GET /api/v1/conversations` | 多轮 conversation 聚合与分页 |
+| `GET /api/v1/activity` | 按项目、conversation 分组的最近任务和用户消息 |
 | `GET /api/v1/turns` | 按状态、项目、conversation、模型、工具筛选 |
 | `GET /api/v1/turns/{turn_id}` | 完整逻辑事件、工具与模型用量时间线 |
 | `GET /api/v1/data-quality` | 分块、解析、终态、partial 和工具配对质量 |

@@ -10,7 +10,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from .parser import ParsedRecord, parse_record, raw_error_id, safe_float, safe_int
+from .parser import (
+    ParsedRecord,
+    normalize_mac_address,
+    parse_record,
+    raw_error_id,
+    safe_float,
+    safe_int,
+)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS raw_records (
@@ -18,6 +25,7 @@ CREATE TABLE IF NOT EXISTS raw_records (
     event_id TEXT NOT NULL,
     schema_version INTEGER NOT NULL,
     project_id TEXT NOT NULL,
+    mac_address TEXT NOT NULL DEFAULT '',
     conversation_id TEXT NOT NULL,
     turn_id TEXT NOT NULL,
     turn_index INTEGER NOT NULL,
@@ -42,6 +50,7 @@ CREATE TABLE IF NOT EXISTS events (
     event_id TEXT PRIMARY KEY,
     schema_version INTEGER NOT NULL,
     project_id TEXT NOT NULL,
+    mac_address TEXT NOT NULL DEFAULT '',
     conversation_id TEXT NOT NULL,
     turn_id TEXT NOT NULL,
     turn_index INTEGER NOT NULL,
@@ -64,6 +73,7 @@ CREATE INDEX IF NOT EXISTS idx_events_type_time ON events(event_type, event_time
 CREATE TABLE IF NOT EXISTS turns (
     turn_id TEXT PRIMARY KEY,
     project_id TEXT NOT NULL,
+    mac_address TEXT NOT NULL DEFAULT '',
     conversation_id TEXT NOT NULL,
     turn_index INTEGER NOT NULL,
     turn_kind TEXT NOT NULL,
@@ -249,15 +259,89 @@ class Database:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as connection:
             connection.executescript(SCHEMA)
-            columns = {
-                str(row["name"])
-                for row in connection.execute("PRAGMA table_info(sync_days)").fetchall()
-            }
-            if "fallback_checked" not in columns:
+            sync_day_columns = self._table_columns(connection, "sync_days")
+            if "fallback_checked" not in sync_day_columns:
                 connection.execute(
                     "ALTER TABLE sync_days "
                     "ADD COLUMN fallback_checked INTEGER NOT NULL DEFAULT 0"
                 )
+            mac_backfill_needed = False
+            for table in ("raw_records", "events", "turns"):
+                if "mac_address" not in self._table_columns(connection, table):
+                    connection.execute(
+                        f"ALTER TABLE {table} "
+                        "ADD COLUMN mac_address TEXT NOT NULL DEFAULT ''"
+                    )
+                    mac_backfill_needed = True
+            if mac_backfill_needed:
+                self._backfill_mac_addresses(connection)
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_raw_records_mac_time "
+                "ON raw_records(mac_address, event_time_ms)"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_events_mac_time "
+                "ON events(mac_address, event_time_ms)"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_turns_mac_time "
+                "ON turns(mac_address, input_time_ms)"
+            )
+            connection.execute(
+                """
+                UPDATE turns
+                SET total_tokens = input_tokens + output_tokens
+                    + cache_read_input_tokens + cache_creation_input_tokens
+                WHERE total_tokens != input_tokens + output_tokens
+                    + cache_read_input_tokens + cache_creation_input_tokens
+                """
+            )
+
+    @staticmethod
+    def _table_columns(connection: sqlite3.Connection, table: str) -> set[str]:
+        return {
+            str(row["name"])
+            for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+
+    def _backfill_mac_addresses(self, connection: sqlite3.Connection) -> None:
+        raw_rows = connection.execute(
+            "SELECT record_id, raw_json FROM raw_records WHERE mac_address=''"
+        ).fetchall()
+        for row in raw_rows:
+            mac_address = normalize_mac_address(
+                _json_object(str(row["raw_json"])).get("mac_address")
+            )
+            if mac_address:
+                connection.execute(
+                    "UPDATE raw_records SET mac_address=? WHERE record_id=?",
+                    (mac_address, row["record_id"]),
+                )
+
+        event_ids = connection.execute(
+            """
+            SELECT DISTINCT r.event_id
+            FROM raw_records r
+            LEFT JOIN events e ON e.event_id=r.event_id
+            WHERE r.mac_address!='' AND COALESCE(e.mac_address, '')=''
+            """
+        ).fetchall()
+        affected_turns: set[str] = set()
+        for row in event_ids:
+            turn_id = self._assemble_event(connection, str(row["event_id"]))
+            if turn_id:
+                affected_turns.add(turn_id)
+        turn_ids = connection.execute(
+            """
+            SELECT DISTINCT e.turn_id
+            FROM events e
+            LEFT JOIN turns t ON t.turn_id=e.turn_id
+            WHERE e.mac_address!='' AND COALESCE(t.mac_address, '')=''
+            """
+        ).fetchall()
+        affected_turns.update(str(row["turn_id"]) for row in turn_ids)
+        for turn_id in sorted(affected_turns):
+            self._rebuild_turn(connection, turn_id)
 
     def ping(self) -> bool:
         try:
@@ -348,12 +432,12 @@ class Database:
                     """
                     INSERT OR IGNORE INTO raw_records(
                         record_id, event_id, schema_version, project_id,
-                        conversation_id, turn_id, turn_index, turn_kind,
+                        mac_address, conversation_id, turn_id, turn_index, turn_kind,
                         event_sequence, event_type, event_time_ms, is_terminal,
                         chunk_index, chunk_count, payload_chunk, raw_json, synced_at
                     ) VALUES (
                         :record_id, :event_id, :schema_version, :project_id,
-                        :conversation_id, :turn_id, :turn_index, :turn_kind,
+                        :mac_address, :conversation_id, :turn_id, :turn_index, :turn_kind,
                         :event_sequence, :event_type, :event_time_ms, :is_terminal,
                         :chunk_index, :chunk_count, :payload_chunk, :raw_json, :synced_at
                     )
@@ -396,6 +480,7 @@ class Database:
         envelope_fields = (
             "schema_version",
             "project_id",
+            "mac_address",
             "conversation_id",
             "turn_id",
             "turn_index",
@@ -434,11 +519,12 @@ class Database:
         connection.execute(
             """
             INSERT INTO events(
-                event_id, schema_version, project_id, conversation_id, turn_id,
+                event_id, schema_version, project_id, mac_address, conversation_id, turn_id,
                 turn_index, turn_kind, event_sequence, event_type, event_time_ms,
                 is_terminal, chunk_count, payload_json, assembled_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(event_id) DO UPDATE SET
+                mac_address=excluded.mac_address,
                 payload_json=excluded.payload_json,
                 chunk_count=excluded.chunk_count,
                 assembled_at=excluded.assembled_at
@@ -447,6 +533,7 @@ class Database:
                 event_id,
                 first["schema_version"],
                 first["project_id"],
+                first["mac_address"],
                 first["conversation_id"],
                 first["turn_id"],
                 first["turn_index"],
@@ -475,6 +562,10 @@ class Database:
         if not rows:
             return
         first = rows[0]
+        mac_addresses = {
+            str(row["mac_address"]) for row in rows if str(row["mac_address"])
+        }
+        mac_address = next(iter(mac_addresses)) if len(mac_addresses) == 1 else ""
         first_ms = min(int(row["event_time_ms"]) for row in rows)
         last_ms = max(int(row["event_time_ms"]) for row in rows)
         input_ms = first_ms
@@ -642,6 +733,7 @@ class Database:
         metrics = {
             "turn_id": turn_id,
             "project_id": first["project_id"],
+            "mac_address": mac_address,
             "conversation_id": first["conversation_id"],
             "turn_index": first["turn_index"],
             "turn_kind": first["turn_kind"],
@@ -676,7 +768,12 @@ class Database:
             "output_tokens": output_tokens,
             "cache_read_input_tokens": cache_read_tokens,
             "cache_creation_input_tokens": cache_creation_tokens,
-            "total_tokens": input_tokens + output_tokens,
+            "total_tokens": (
+                input_tokens
+                + output_tokens
+                + cache_read_tokens
+                + cache_creation_tokens
+            ),
             "total_cost_usd": total_cost_usd,
             "duration_ms": duration_ms,
             "duration_api_ms": duration_api_ms,
@@ -691,7 +788,7 @@ class Database:
         connection.execute(
             """
             INSERT INTO turns(
-                turn_id, project_id, conversation_id, turn_index, turn_kind,
+                turn_id, project_id, mac_address, conversation_id, turn_index, turn_kind,
                 input_time_ms, started_time_ms, finished_time_ms, first_event_ms,
                 last_event_ms, status, primary_model, stop_reason, terminal_reason,
                 error_code, event_count, attachment_count, input_chars, query_chars,
@@ -704,7 +801,7 @@ class Database:
                 queue_duration_ms, service_duration_ms, num_agent_turns,
                 has_agent_result, has_terminal, has_partial, updated_at
             ) VALUES (
-                :turn_id, :project_id, :conversation_id, :turn_index, :turn_kind,
+                :turn_id, :project_id, :mac_address, :conversation_id, :turn_index, :turn_kind,
                 :input_time_ms, :started_time_ms, :finished_time_ms, :first_event_ms,
                 :last_event_ms, :status, :primary_model, :stop_reason, :terminal_reason,
                 :error_code, :event_count, :attachment_count, :input_chars, :query_chars,
@@ -719,6 +816,7 @@ class Database:
             )
             ON CONFLICT(turn_id) DO UPDATE SET
                 project_id=excluded.project_id,
+                mac_address=excluded.mac_address,
                 conversation_id=excluded.conversation_id,
                 turn_index=excluded.turn_index,
                 turn_kind=excluded.turn_kind,

@@ -18,6 +18,7 @@ def event_records(
     turn_index: int = 1,
     turn_kind: str = "coding",
     chunk_size: int | None = None,
+    mac_address: str | None = None,
 ) -> list[dict[str, Any]]:
     encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     chunks = (
@@ -34,6 +35,7 @@ def event_records(
             "record_id": f"{event_id}:{chunk_index:04d}",
             "event_id": event_id,
             "project_id": project_id,
+            **({"mac_address": mac_address} if mac_address is not None else {}),
             "conversation_id": conversation_id,
             "turn_id": turn_id,
             "turn_index": str(turn_index),
@@ -67,12 +69,14 @@ def complete_turn(
     model: str = "claude-sonnet-test",
     tool_error: bool = False,
     cost_usd: float = 0.12,
+    mac_address: str | None = None,
 ) -> list[dict[str, Any]]:
     common = {
         "turn_id": turn_id,
         "project_id": project_id,
         "conversation_id": conversation_id,
         "turn_index": turn_index,
+        "mac_address": mac_address,
     }
     events: list[tuple[str, dict[str, Any]]] = [
         ("user_input", {"prompt": "请创建温度仪表盘", "attachments": [{"name": "a.png"}]}),

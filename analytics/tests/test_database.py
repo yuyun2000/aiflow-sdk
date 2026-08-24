@@ -8,7 +8,7 @@ from .fixtures import complete_turn, event_records
 
 
 def test_database_reconstructs_complete_turn_usage_content_and_tools(database) -> None:
-    records = complete_turn()
+    records = complete_turn(mac_address="aa-bb-cc-dd-ee-ff")
     result = database.insert_logs(reversed(records))
 
     assert result["inserted"] == len(records)
@@ -16,9 +16,10 @@ def test_database_reconstructs_complete_turn_usage_content_and_tools(database) -
     turn = database.query_one("SELECT * FROM turns WHERE turn_id='turn_alpha'")
     assert turn is not None
     assert turn["status"] == "completed"
+    assert turn["mac_address"] == "AA:BB:CC:DD:EE:FF"
     assert turn["input_tokens"] == 100
     assert turn["output_tokens"] == 40
-    assert turn["total_tokens"] == 140
+    assert turn["total_tokens"] == 180
     assert turn["total_cost_usd"] == 0.12
     assert turn["duration_ms"] == 9000
     assert turn["duration_api_ms"] == 7000
@@ -42,6 +43,11 @@ def test_database_reconstructs_complete_turn_usage_content_and_tools(database) -
     assert duplicate["inserted"] == 0
     assert duplicate["duplicates"] == len(records)
     assert database.query_one("SELECT COUNT(*) AS count FROM turns")["count"] == 1
+
+    raw = database.query_one("SELECT mac_address FROM raw_records LIMIT 1")
+    event = database.query_one("SELECT mac_address FROM events LIMIT 1")
+    assert raw is not None and raw["mac_address"] == "AA:BB:CC:DD:EE:FF"
+    assert event is not None and event["mac_address"] == "AA:BB:CC:DD:EE:FF"
 
 
 def test_incomplete_chunks_wait_for_later_sync(database) -> None:
@@ -149,3 +155,46 @@ def test_initialize_migrates_legacy_sync_days_and_requires_fallback_validation(
     )
     assert database.day_is_synced("2026-08-06") is True
     assert database.historical_sync_needed("2026-08-06", "2026-08-06") is False
+
+
+def test_initialize_recalculates_legacy_total_tokens(database) -> None:
+    database.insert_logs(complete_turn("turn-legacy-token-total"))
+    with database.connect() as connection:
+        connection.execute(
+            "UPDATE turns SET total_tokens=140 WHERE turn_id=?",
+            ("turn-legacy-token-total",),
+        )
+
+    database.initialize()
+
+    turn = database.query_one(
+        "SELECT total_tokens FROM turns WHERE turn_id=?",
+        ("turn-legacy-token-total",),
+    )
+    assert turn is not None
+    assert turn["total_tokens"] == 180
+
+
+def test_initialize_backfills_mac_from_legacy_raw_json(database) -> None:
+    database.insert_logs(
+        complete_turn(
+            "turn-legacy-mac",
+            mac_address="aabbccddeeff",
+        )
+    )
+    with database.connect() as connection:
+        for index_name in (
+            "idx_raw_records_mac_time",
+            "idx_events_mac_time",
+            "idx_turns_mac_time",
+        ):
+            connection.execute(f"DROP INDEX {index_name}")
+        for table in ("raw_records", "events", "turns"):
+            connection.execute(f"ALTER TABLE {table} DROP COLUMN mac_address")
+
+    database.initialize()
+
+    for table in ("raw_records", "events", "turns"):
+        row = database.query_one(f"SELECT mac_address FROM {table} LIMIT 1")
+        assert row is not None
+        assert row["mac_address"] == "AA:BB:CC:DD:EE:FF"

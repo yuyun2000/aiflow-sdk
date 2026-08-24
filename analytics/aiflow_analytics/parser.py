@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
 TRACE_EVENT_NAME = "aiflow_conversation_trace"
+_MAC_HEX_PATTERN = re.compile(r"^[0-9A-Fa-f]{12}$")
 
 
 def safe_int(value: Any) -> int | None:
@@ -34,6 +36,17 @@ def parse_bool(value: Any) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
+def normalize_mac_address(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw or raw.lower() in {"null", "none"}:
+        return ""
+    compact = re.sub(r"[:.\-\s]", "", raw)
+    if _MAC_HEX_PATTERN.fullmatch(compact):
+        normalized = compact.upper()
+        return ":".join(normalized[index : index + 2] for index in range(0, 12, 2))
+    return raw
+
+
 def _event_time_ms(log: dict[str, Any]) -> int:
     direct = safe_int(log.get("event_time_unix_ms"))
     if direct is not None:
@@ -54,6 +67,7 @@ class ParsedRecord:
     event_id: str
     schema_version: int
     project_id: str
+    mac_address: str
     conversation_id: str
     turn_id: str
     turn_index: int
@@ -117,6 +131,7 @@ def parse_record(log: dict[str, Any], expected_schema_version: int) -> ParsedRec
         event_id=required["event_id"],
         schema_version=schema_version,
         project_id=required["project_id"],
+        mac_address=normalize_mac_address(log.get("mac_address")),
         conversation_id=required["conversation_id"],
         turn_id=required["turn_id"],
         turn_index=turn_index,

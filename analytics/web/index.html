@@ -7,7 +7,7 @@
   <meta name="description" content="AIFlow 对话日志实时监控台">
   <title>AIFlow 对话日志监控</title>
   <link rel="icon" href="data:,">
-  <link rel="stylesheet" href="/assets/app.css">
+  <link rel="stylesheet" href="/assets/app.css?v=20260824-mac-stats">
 </head>
 <body>
   <header class="app-header">
@@ -57,14 +57,16 @@
     </section>
 
     <section class="metric-grid" aria-label="核心指标">
-      <article class="metric-card accent-teal"><span>任务数</span><strong id="metric-turns">--</strong><small id="metric-turns-note">-- 个对话</small></article>
+      <article class="metric-card accent-teal"><span>任务数</span><strong id="metric-turns">--</strong><small id="metric-turns-note">-- 个会话</small></article>
+      <article class="metric-card accent-indigo"><span>平均任务 / 会话</span><strong id="metric-depth">--</strong><small id="metric-depth-note">-- 个会话 / -- 个项目</small></article>
       <article class="metric-card accent-blue"><span>完成率</span><strong id="metric-completion">--</strong><small id="metric-completion-note">-- 完成 / -- 失败</small></article>
-      <article class="metric-card accent-violet"><span>总 Token</span><strong id="metric-tokens">--</strong><small id="metric-tokens-note">输入 -- / 输出 -- / 缓存读取 --</small></article>
+      <article class="metric-card accent-violet"><span>总 Token（含缓存）</span><strong id="metric-tokens">--</strong><small id="metric-tokens-note">总输入 -- / 输出 --</small></article>
+      <article class="metric-card accent-green"><span>缓存命中率</span><strong id="metric-cache-hit">--</strong><small id="metric-cache-hit-note">读取 -- / 输入总量 --</small></article>
       <article class="metric-card accent-coral"><span>总费用</span><strong id="metric-cost">--</strong><small id="metric-cost-note">单任务 --</small></article>
+      <article class="metric-card accent-amber"><span>平均费用 / 会话</span><strong id="metric-average-cost">--</strong><small id="metric-average-cost-note">每任务 --</small></article>
       <article class="metric-card accent-amber"><span>平均服务耗时</span><strong id="metric-latency">--</strong><small id="metric-latency-note">P95 --</small></article>
       <article class="metric-card accent-slate"><span>工具错误率</span><strong id="metric-tool-errors">--</strong><small id="metric-tool-errors-note">-- 次调用 / -- 次错误</small></article>
-      <article class="metric-card accent-indigo"><span>Thinking 字符</span><strong id="metric-thinking">--</strong><small id="metric-thinking-note">回复字符 --</small></article>
-      <article class="metric-card accent-green"><span>日志完整度</span><strong id="metric-quality">--</strong><small id="metric-quality-note">-- 个物理记录</small></article>
+      <article class="metric-card accent-green"><span>设备数</span><strong id="metric-devices">--</strong><small id="metric-devices-note">仅统计有 MAC 的日志</small></article>
     </section>
 
     <section class="dashboard-grid trend-grid">
@@ -85,7 +87,7 @@
 
     <section class="dashboard-grid split-grid">
       <article class="panel">
-        <div class="panel-heading"><div><h2>模型用量</h2><p>Token、成本和任务分布</p></div></div>
+        <div class="panel-heading"><div><h2>模型用量</h2><p>含缓存 Token、缓存命中率、成本和任务分布</p></div></div>
         <div class="bar-list" id="models-list"></div>
       </article>
       <article class="panel pricing-panel">
@@ -107,9 +109,16 @@
       </article>
     </section>
 
+    <section class="panel devices-panel">
+      <div class="panel-heading devices-heading"><div><h2>设备统计</h2><p>当前周期内有 MAC 地址的设备用量</p></div><span id="devices-count" class="muted-caption">--</span></div>
+      <div class="device-table-heading" aria-hidden="true"><span>设备 / 最近活动</span><span>项目 / 会话</span><span>任务</span><span>Token（含缓存）</span><span>缓存</span><span>费用</span></div>
+      <div class="device-list" id="device-list"></div>
+      <div class="table-footer"><span id="devices-page-label">--</span><div><button class="button small secondary" id="devices-prev" type="button">上一页</button><button class="button small secondary" id="devices-next" type="button">下一页</button></div></div>
+    </section>
+
     <section class="panel turns-panel">
-      <div class="panel-heading turns-heading"><div><h2>最近任务</h2><p>点击任务查看用户输入、thinking、回复和工具时间线</p></div><span id="turns-count" class="muted-caption">--</span></div>
-      <div class="table-scroll"><table><thead><tr><th>任务 / 对话</th><th>状态</th><th>模型</th><th class="numeric">Token</th><th class="numeric">费用</th><th class="numeric">耗时</th><th>工具</th><th>更新时间</th></tr></thead><tbody id="turns-table"></tbody></table></div>
+      <div class="panel-heading turns-heading"><div><h2>最近会话</h2><p>按项目和会话归类，组内任务按时间正序排列</p></div><span id="turns-count" class="muted-caption">--</span></div>
+      <div class="activity-list" id="activity-list"></div>
       <div class="table-footer"><span id="turns-page-label">--</span><div><button class="button small secondary" id="turns-prev" type="button">上一页</button><button class="button small secondary" id="turns-next" type="button">下一页</button></div></div>
     </section>
   </main>
@@ -133,6 +142,6 @@
   <div class="drawer-backdrop" id="drawer-backdrop" hidden></div>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-  <script src="/assets/app.js"></script>
+  <script src="/assets/app.js?v=20260824-mac-stats"></script>
 </body>
 </html>

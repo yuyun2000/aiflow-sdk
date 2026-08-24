@@ -29,7 +29,9 @@ class PassiveSync:
 
 
 def test_health_auth_dashboard_and_turn_detail(settings, database) -> None:
-    database.insert_logs(complete_turn("turn-api"))
+    database.insert_logs(
+        complete_turn("turn-api", mac_address="AA:BB:CC:DD:EE:FF")
+    )
     app = create_app(
         settings,
         database=database,
@@ -58,6 +60,7 @@ def test_health_auth_dashboard_and_turn_detail(settings, database) -> None:
         assert overview.status_code == 200
         overview_payload = overview.json()
         assert overview_payload["volume"]["turns"] == 1
+        assert overview_payload["volume"]["devices"] == 1
         assert overview_payload["usage"]["cache_read_input_tokens"] == 30
         assert overview_payload["cost"]["actual_usd"] == 0.000946
         assert overview_payload["cost"]["sdk_reported_usd"] == 0.12
@@ -68,6 +71,21 @@ def test_health_auth_dashboard_and_turn_detail(settings, database) -> None:
         )
         assert conversations.status_code == 200
         assert conversations.json()["items"][0]["configured_actual_usd"] == 0.000946
+        devices = client.get(
+            "/api/v1/devices?start_date=2026-08-06&end_date=2026-08-06",
+            headers=headers,
+        )
+        assert devices.status_code == 200
+        assert devices.json()["items"][0]["mac_address"] == "AA:BB:CC:DD:EE:FF"
+        assert devices.json()["items"][0]["total_tokens"] == 180
+        activity = client.get(
+            "/api/v1/activity?start_date=2026-08-06&end_date=2026-08-06",
+            headers=headers,
+        )
+        assert activity.status_code == 200
+        assert activity.json()["projects"][0]["conversations"][0]["tasks"][0][
+            "user_message"
+        ] == "请创建温度仪表盘"
         turns = client.get(
             "/api/v1/turns?start_date=2026-08-06&end_date=2026-08-06",
             headers=headers,
@@ -76,7 +94,7 @@ def test_health_auth_dashboard_and_turn_detail(settings, database) -> None:
         assert turns.json()["items"][0]["configured_actual_usd"] == 0.000946
         detail = client.get("/api/v1/turns/turn-api", headers=headers)
         assert detail.status_code == 200
-        assert detail.json()["turn"]["total_tokens"] == 140
+        assert detail.json()["turn"]["total_tokens"] == 180
         assert client.post(
             "/api/v1/sync",
             headers=headers,

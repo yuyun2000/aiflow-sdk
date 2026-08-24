@@ -17,6 +17,7 @@
 
 - `aiflow_server/`：当前 V3 服务实现。
 - `web/`：无构建步骤的同源网页客户端，入口为 `web/index.html` 和 `web/app.js`。
+- `analytics/`：独立的 TLS 对话日志分析后台、SQLite 分析库和监控页面；处理统计、设备用量、历史同步或后台 UI 前，先读 `analytics/AGENTS.md`。
 - `skills/`：复制到设备工作区 `.claude/skills/` 的运行时 Skills。
 - `server_config.json`：非机密默认配置和容量、限流、Agent、推送设置。
 - `.env.example`：第三方模型和部署环境变量示例；真实值只放 `.env.local` 或外部环境文件。
@@ -26,6 +27,16 @@
 - `legacy/v2/` 和 `docs/legacy/`：迁移参考，不是当前实现依据，除非任务明确要求迁移兼容，否则不要修改。
 
 接口、字段、配置或网页行为变化时，同步更新 README、对应 V3 文档、示例和测试。较大的架构变更在 `docs/plans/` 增加或更新计划。
+
+## Analytics Backend Boundary
+
+- 分析后台入口是 `analytics/server.py`，核心实现位于 `analytics/aiflow_analytics/`，页面位于 `analytics/web/`；它与 `aiflow_server.gateway:app` 分进程、分依赖、分数据库运行。
+- 分析后台通过只读火山引擎 TLS `SearchLogsV2` 拉取 `aiflow_conversation_trace`，不得读取或修改 AIFlow 主服务 SQLite。日常本地运行和配置检查使用 `cd analytics && ./manage.sh ...`。
+- TLS 物理记录先进入 `raw_records`，完整分块再组装为 `events`，最后按 `turn_id` 重建 `turns`、`tool_calls` 和 `turn_model_usage`；不要绕过原始层或用不完整分块制造事件。
+- 总 Token 口径固定为“未缓存输入 + 缓存读取 + 缓存写入 + 输出”；缓存命中率固定为“缓存读取 /（未缓存输入 + 缓存读取 + 缓存写入）”。费用优先按 `analytics/model_pricing.json` 的逐模型价格计算，SDK `total_cost_usd` 仅作为 Claude 计价参考。
+- TLS 顶层 `mac_address` 是可选设备统计维度。缺失、空白、`null` 或 `none` 的旧日志不计入设备数和设备明细；常见 MAC 格式统一为大写冒号格式。旧分析库升级必须非破坏性加列，并从 `raw_records.raw_json` 回填已有非空 MAC，不要求重拉 TLS。
+- 最近活动按项目、会话、任务分层展示；会话按 `(project_id, conversation_id)` 识别，内部任务按时间顺序排列。用户消息保持突出，thinking、模型回复、工具和模型用量默认折叠。
+- 分析后台的详细数据契约、同步规则、测试矩阵和浏览器验收要求以 `analytics/AGENTS.md` 为准。
 
 ## Runtime Architecture Invariants
 
@@ -71,6 +82,7 @@
 - 模型凭证只通过 `ANTHROPIC_BASE_URL`、`ANTHROPIC_AUTH_TOKEN` 或 `ANTHROPIC_API_KEY` 等环境变量配置；认证变量按提供方要求二选一。
 - 未经用户当前请求明确授权，不执行真实模型任务、设备推送、远端部署/重启、项目删除、上下文删除或生产数据迁移。
 - 单元和集成测试必须使用 fake runner、临时目录和本地 recording HTTP server，不消耗模型费用、不访问真实设备推送端点。
+- 分析后台测试必须使用 fake TLS client、临时 SQLite 和虚构 MAC；常规验证不拉取真实 TLS Topic，不展示或提交真实设备 MAC。真实同步、生产迁移和远端分析服务重启需要用户本次明确授权。
 - 部署计划接口是离线校验；实际 `direct-run`、`deploy_mode=server/agent` 和推送脚本的非 `plan` 命令都属于设备状态变更。
 - 删除上下文会删除项目、任务、事件和文件，属于破坏性操作；先解析精确目标并取得明确授权。
 
@@ -123,6 +135,7 @@ node --test tests/assistant_stream_state.test.cjs
 - `schemas.py`、`config.py`、API 字段：`tests/test_config.py`、相关 V3 测试和文档示例。
 - `web/`：Node 测试，并在实际浏览器检查桌面/移动视口、SSE 增量、工具结果、心跳区、断线恢复和无重复最终回复。
 - `manage.sh`：`bash -n manage.sh`，并验证目标命令的成功与失败路径。
+- `analytics/`：按 `analytics/AGENTS.md` 运行分析模块测试、Ruff、Python/JavaScript 语法和 `analytics/manage.sh` 检查；后台页面改动还要用虚构数据检查桌面和移动视口、独立分页、任务详情及无横向溢出。
 
 提交前通用检查：
 

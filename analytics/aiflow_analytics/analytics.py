@@ -46,6 +46,19 @@ def _priced_tokens(tokens: int | float, price: float | None) -> float | None:
     return round(float(tokens) * price / 1_000_000, 6)
 
 
+def _token_usage_fields(row: dict[str, Any]) -> dict[str, Any]:
+    input_tokens = int(row.get("input_tokens") or 0)
+    output_tokens = int(row.get("output_tokens") or 0)
+    cache_read_tokens = int(row.get("cache_read_input_tokens") or 0)
+    cache_creation_tokens = int(row.get("cache_creation_input_tokens") or 0)
+    total_input_tokens = input_tokens + cache_read_tokens + cache_creation_tokens
+    return {
+        "input_tokens_including_cache": total_input_tokens,
+        "total_tokens": total_input_tokens + output_tokens,
+        "cache_hit_rate": _ratio(cache_read_tokens, total_input_tokens),
+    }
+
+
 _UNKNOWN_MODEL_NAMES = {
     "",
     "unknown",
@@ -197,12 +210,14 @@ class Analytics:
                 ),
             }
             values = [value for value in breakdown.values() if value is not None]
-            configured = bool(prices) and all(key in prices for key in self._PRICE_FIELDS)
+            configured = bool(prices) and all(
+                prices.get(key) is not None for key in self._PRICE_FIELDS
+            )
             estimates.append(
                 {
                     "model": model,
                     "configured": configured,
-                    "tokens": counts,
+                    "tokens": {**counts, **_token_usage_fields(counts)},
                     "unit_prices_usd_per_million": prices or {},
                     "estimated_breakdown_usd": breakdown,
                     "estimated_usd": round(sum(values), 6) if values else None,
@@ -262,6 +277,35 @@ class Analytics:
         )
         return self._cost_fields(model_rows, [turn], turn.get("total_cost_usd"))
 
+    def _decorate_turns(self, turns: list[dict[str, Any]]) -> None:
+        if not turns:
+            return
+        model_rows_by_turn: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        turn_ids = [str(turn["turn_id"]) for turn in turns]
+        for start in range(0, len(turn_ids), 500):
+            batch = turn_ids[start : start + 500]
+            placeholders = ",".join("?" for _ in batch)
+            model_rows = self.database.query(
+                f"""
+                SELECT m.*, t.primary_model
+                FROM turn_model_usage m
+                JOIN turns t ON t.turn_id=m.turn_id
+                WHERE m.turn_id IN ({placeholders})
+                """,
+                tuple(batch),
+            )
+            for row in model_rows:
+                model_rows_by_turn[str(row["turn_id"])].append(row)
+        for turn in turns:
+            turn.update(_token_usage_fields(turn))
+            turn.update(
+                self._cost_fields(
+                    model_rows_by_turn.get(str(turn["turn_id"]), []),
+                    [turn],
+                    turn.get("total_cost_usd"),
+                )
+            )
+
     def _conversation_cost_fields(
         self,
         period: Period,
@@ -293,6 +337,35 @@ class Analytics:
         )
         return self._cost_fields(model_rows, fallback_rows, sdk_reported_usd)
 
+    def _device_cost_fields(
+        self,
+        period: Period,
+        mac_address: str,
+        sdk_reported_usd: float | None,
+    ) -> dict[str, Any]:
+        model_rows = self.database.query(
+            """
+            SELECT m.model, m.canonical_model, m.turn_id, t.primary_model,
+                   m.input_tokens, m.output_tokens,
+                   m.cache_read_input_tokens, m.cache_creation_input_tokens
+            FROM turn_model_usage m
+            JOIN turns t ON t.turn_id=m.turn_id
+            WHERE t.input_time_ms>=? AND t.input_time_ms<?
+              AND t.mac_address=?
+            """,
+            (period.start_ms, period.end_ms, mac_address),
+        )
+        fallback_rows = self.database.query(
+            """
+            SELECT turn_id, primary_model, input_tokens, output_tokens,
+                   cache_read_input_tokens, cache_creation_input_tokens
+            FROM turns
+            WHERE input_time_ms>=? AND input_time_ms<? AND mac_address=?
+            """,
+            (period.start_ms, period.end_ms, mac_address),
+        )
+        return self._cost_fields(model_rows, fallback_rows, sdk_reported_usd)
+
     def _turn_rows(self, period: Period) -> list[dict[str, Any]]:
         period.validate()
         return self.database.query(
@@ -308,7 +381,12 @@ class Analytics:
         incomplete = total - completed - failed - cancelled
         input_tokens = int(_sum(rows, "input_tokens"))
         output_tokens = int(_sum(rows, "output_tokens"))
-        total_tokens = int(_sum(rows, "total_tokens"))
+        cache_read_tokens = int(_sum(rows, "cache_read_input_tokens"))
+        cache_creation_tokens = int(_sum(rows, "cache_creation_input_tokens"))
+        input_tokens_including_cache = (
+            input_tokens + cache_read_tokens + cache_creation_tokens
+        )
+        total_tokens = input_tokens_including_cache + output_tokens
         cost_values = [
             float(row["total_cost_usd"])
             for row in rows
@@ -318,8 +396,6 @@ class Analytics:
         # Keep total_usd as the established numeric field while exposing whether
         # the SDK returned a billable value for this period.
         cost = actual_cost if actual_cost is not None else 0.0
-        cache_read_tokens = int(_sum(rows, "cache_read_input_tokens"))
-        cache_creation_tokens = int(_sum(rows, "cache_creation_input_tokens"))
         model_estimates = self._model_estimates(period, rows)
         estimated_breakdown = {
             field: (
@@ -367,18 +443,27 @@ class Analytics:
         service_values = [row["service_duration_ms"] for row in rows]
         queue_values = [row["queue_duration_ms"] for row in rows]
         api_values = [row["duration_api_ms"] for row in rows]
+        conversation_count = len(
+            {(row["project_id"], row["conversation_id"]) for row in rows}
+        )
+        project_count = len({row["project_id"] for row in rows})
+        device_count = len(
+            {str(row["mac_address"]) for row in rows if str(row["mac_address"])}
+        )
         return {
             "period": period.as_dict(self.timezone),
             "volume": {
                 "turns": total,
-                "conversations": len({row["conversation_id"] for row in rows}),
-                "projects": len({row["project_id"] for row in rows}),
+                "conversations": conversation_count,
+                "projects": project_count,
+                "devices": device_count,
                 "completed": completed,
                 "failed": failed,
                 "cancelled": cancelled,
                 "incomplete": incomplete,
                 "completion_rate": _ratio(completed, total),
                 "failure_rate": _ratio(failed, total),
+                "turns_per_conversation": _ratio(total, conversation_count),
             },
             "usage": {
                 "input_tokens": input_tokens,
@@ -386,8 +471,14 @@ class Analytics:
                 "total_tokens": total_tokens,
                 "cache_read_input_tokens": cache_read_tokens,
                 "cache_creation_input_tokens": cache_creation_tokens,
+                "input_tokens_including_cache": input_tokens_including_cache,
+                "cache_hit_rate": _ratio(
+                    cache_read_tokens, input_tokens_including_cache
+                ),
                 "tokens_per_turn": _ratio(total_tokens, total),
-                "output_input_ratio": _ratio(output_tokens, input_tokens),
+                "output_input_ratio": _ratio(
+                    output_tokens, input_tokens_including_cache
+                ),
             },
             "cost": {
                 # total_usd is retained for API compatibility and is the SDK's
@@ -412,6 +503,24 @@ class Analytics:
                 "per_turn_usd": _ratio(cost, total),
                 "per_completed_turn_usd": _ratio(cost, completed),
                 "per_1k_tokens_usd": _ratio(cost * 1000, total_tokens),
+                "actual_per_turn_usd": (
+                    _ratio(configured_actual_cost, total)
+                    if configured_actual_cost is not None
+                    else None
+                ),
+                "actual_per_conversation_usd": (
+                    _ratio(configured_actual_cost, conversation_count)
+                    if configured_actual_cost is not None
+                    else None
+                ),
+                "sdk_reported_per_turn_usd": (
+                    _ratio(actual_cost, total) if actual_cost is not None else None
+                ),
+                "sdk_reported_per_conversation_usd": (
+                    _ratio(actual_cost, conversation_count)
+                    if actual_cost is not None
+                    else None
+                ),
             },
             "latency_ms": {
                 "agent_avg": _average(duration_values),
@@ -473,10 +582,14 @@ class Analytics:
             "volume.turns",
             "volume.conversations",
             "volume.projects",
+            "volume.turns_per_conversation",
             "volume.completion_rate",
             "usage.total_tokens",
             "usage.output_tokens",
+            "usage.cache_hit_rate",
             "cost.actual_usd",
+            "cost.actual_per_turn_usd",
+            "cost.actual_per_conversation_usd",
             "latency_ms.agent_p95",
             "latency_ms.service_p95",
             "content.thinking_chars",
@@ -570,9 +683,10 @@ class Analytics:
             (*params, limit),
         )
         for model in models:
+            model.update(_token_usage_fields(model))
             prices = self._pricing_for_model(str(model["model"]))
             model["configured"] = bool(prices) and all(
-                key in prices for key in self._PRICE_FIELDS
+                prices.get(key) is not None for key in self._PRICE_FIELDS
             )
             model["unit_prices_usd_per_million"] = prices or {}
             model["estimated_breakdown_usd"] = {
@@ -663,7 +777,9 @@ class Analytics:
             dimensions[name] = self.database.query(
                 f"""
                 SELECT {field} AS value, COUNT(*) AS turns,
-                       SUM(total_tokens) AS tokens,
+                       SUM(input_tokens + output_tokens
+                           + cache_read_input_tokens
+                           + cache_creation_input_tokens) AS tokens,
                        ROUND(SUM(COALESCE(total_cost_usd, 0)), 6) AS cost_usd
                 FROM turns
                 WHERE input_time_ms>=? AND input_time_ms<? AND {field}!=''
@@ -685,6 +801,74 @@ class Analytics:
             **dimensions,
         }
 
+    def devices(
+        self,
+        period: Period,
+        *,
+        page: int = 1,
+        page_size: int = 20,
+    ) -> dict[str, Any]:
+        period.validate()
+        params = (period.start_ms, period.end_ms)
+        total_row = self.database.query_one(
+            """
+            SELECT COUNT(DISTINCT mac_address) AS count
+            FROM turns
+            WHERE input_time_ms>=? AND input_time_ms<? AND mac_address!=''
+            """,
+            params,
+        )
+        offset = (page - 1) * page_size
+        items = self.database.query(
+            """
+            SELECT mac_address,
+                   COUNT(DISTINCT project_id) AS projects,
+                   COUNT(DISTINCT project_id || X'1F' || conversation_id)
+                       AS conversations,
+                   COUNT(*) AS turns,
+                   SUM(status='completed') AS completed,
+                   SUM(status='failed') AS failed,
+                   SUM(status='cancelled') AS cancelled,
+                   SUM(status NOT IN ('completed', 'failed', 'cancelled')) AS incomplete,
+                   SUM(input_tokens) AS input_tokens,
+                   SUM(output_tokens) AS output_tokens,
+                   SUM(cache_read_input_tokens) AS cache_read_input_tokens,
+                   SUM(cache_creation_input_tokens) AS cache_creation_input_tokens,
+                   SUM(input_tokens + output_tokens
+                       + cache_read_input_tokens
+                       + cache_creation_input_tokens) AS total_tokens,
+                   ROUND(SUM(total_cost_usd), 6) AS total_cost_usd,
+                   SUM(tool_call_count) AS tool_calls,
+                   MAX(COALESCE(finished_time_ms, last_event_ms)) AS last_turn_ms
+            FROM turns
+            WHERE input_time_ms>=? AND input_time_ms<? AND mac_address!=''
+            GROUP BY mac_address
+            ORDER BY last_turn_ms DESC, mac_address
+            LIMIT ? OFFSET ?
+            """,
+            (*params, page_size, offset),
+        )
+        for item in items:
+            item.update(_token_usage_fields(item))
+            item.update(
+                self._device_cost_fields(
+                    period,
+                    str(item["mac_address"]),
+                    item.get("total_cost_usd"),
+                )
+            )
+        total = int(total_row["count"] if total_row else 0)
+        return {
+            "period": period.as_dict(self.timezone),
+            "items": items,
+            "pagination": {
+                "page": page,
+                "page_size": page_size,
+                "total": total,
+                "has_next": offset + len(items) < total,
+            },
+        }
+
     def conversations(
         self,
         period: Period,
@@ -701,7 +885,12 @@ class Analytics:
             params.append(project_id)
         where = " AND ".join(conditions)
         total_row = self.database.query_one(
-            f"SELECT COUNT(DISTINCT conversation_id) AS count FROM turns WHERE {where}",
+            f"""
+            SELECT COUNT(*) AS count FROM (
+                SELECT 1 FROM turns WHERE {where}
+                GROUP BY project_id, conversation_id
+            )
+            """,
             tuple(params),
         )
         offset = (page - 1) * page_size
@@ -713,7 +902,13 @@ class Analytics:
                    SUM(status='completed') AS completed,
                    SUM(status='failed') AS failed,
                    SUM(status='cancelled') AS cancelled,
-                   SUM(total_tokens) AS total_tokens,
+                   SUM(input_tokens) AS input_tokens,
+                   SUM(output_tokens) AS output_tokens,
+                   SUM(cache_read_input_tokens) AS cache_read_input_tokens,
+                   SUM(cache_creation_input_tokens) AS cache_creation_input_tokens,
+                   SUM(input_tokens + output_tokens
+                       + cache_read_input_tokens
+                       + cache_creation_input_tokens) AS total_tokens,
                    ROUND(SUM(total_cost_usd), 6) AS total_cost_usd,
                    SUM(tool_call_count) AS tool_calls,
                    SUM(thinking_chars) AS thinking_chars,
@@ -726,6 +921,7 @@ class Analytics:
             (*params, page_size, offset),
         )
         for item in items:
+            item.update(_token_usage_fields(item))
             item.update(
                 self._conversation_cost_fields(
                     period,
@@ -744,6 +940,100 @@ class Analytics:
                 "has_next": offset + len(items) < total,
             },
         }
+
+    def recent_activity(
+        self,
+        period: Period,
+        *,
+        page: int = 1,
+        page_size: int = 12,
+    ) -> dict[str, Any]:
+        conversation_page = self.conversations(
+            period,
+            page=page,
+            page_size=page_size,
+        )
+        conversations = conversation_page["items"]
+        if not conversations:
+            return {"projects": [], "pagination": conversation_page["pagination"]}
+
+        key_conditions = []
+        key_params: list[Any] = [period.start_ms, period.end_ms]
+        for conversation in conversations:
+            key_conditions.append("(project_id=? AND conversation_id=?)")
+            key_params.extend(
+                [conversation["project_id"], conversation["conversation_id"]]
+            )
+        turn_rows = self.database.query(
+            f"""
+            SELECT * FROM turns
+            WHERE input_time_ms>=? AND input_time_ms<?
+              AND ({" OR ".join(key_conditions)})
+            ORDER BY input_time_ms, turn_index, turn_id
+            """,
+            tuple(key_params),
+        )
+        self._decorate_turns(turn_rows)
+
+        user_messages: dict[str, str] = {}
+        turn_ids = [str(turn["turn_id"]) for turn in turn_rows]
+        for start in range(0, len(turn_ids), 500):
+            batch = turn_ids[start : start + 500]
+            placeholders = ",".join("?" for _ in batch)
+            event_rows = self.database.query(
+                f"""
+                SELECT turn_id, payload_json
+                FROM events
+                WHERE turn_id IN ({placeholders})
+                  AND event_type IN ('user_input', 'direct_deploy_input')
+                ORDER BY event_sequence, event_id
+                """,
+                tuple(batch),
+            )
+            for event in event_rows:
+                turn_id = str(event["turn_id"])
+                if turn_id in user_messages:
+                    continue
+                payload = json.loads(event["payload_json"])
+                user_messages[turn_id] = str(payload.get("prompt") or "")
+
+        turns_by_conversation: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+        for turn in turn_rows:
+            turn["user_message"] = user_messages.get(str(turn["turn_id"]), "")
+            turns_by_conversation[
+                (str(turn["project_id"]), str(turn["conversation_id"]))
+            ].append(turn)
+
+        projects_by_id: dict[str, dict[str, Any]] = {}
+        for conversation in conversations:
+            project_id = str(conversation["project_id"])
+            project = projects_by_id.setdefault(
+                project_id,
+                {
+                    "project_id": project_id,
+                    "last_turn_ms": conversation["last_turn_ms"],
+                    "conversation_count": 0,
+                    "turns": 0,
+                    "conversations": [],
+                },
+            )
+            project["last_turn_ms"] = max(
+                int(project["last_turn_ms"] or 0),
+                int(conversation["last_turn_ms"] or 0),
+            )
+            project["conversation_count"] += 1
+            project["turns"] += int(conversation["turns"] or 0)
+            conversation["tasks"] = turns_by_conversation.get(
+                (project_id, str(conversation["conversation_id"])), []
+            )
+            project["conversations"].append(conversation)
+
+        projects = sorted(
+            projects_by_id.values(),
+            key=lambda item: int(item["last_turn_ms"] or 0),
+            reverse=True,
+        )
+        return {"projects": projects, "pagination": conversation_page["pagination"]}
 
     def turns(
         self,
@@ -787,8 +1077,7 @@ class Analytics:
             """,
             (*params, page_size, offset),
         )
-        for item in items:
-            item.update(self._turn_cost_fields(item))
+        self._decorate_turns(items)
         total = int(total_row["count"] if total_row else 0)
         return {
             "items": items,
@@ -804,6 +1093,7 @@ class Analytics:
         turn = self.database.query_one("SELECT * FROM turns WHERE turn_id=?", (turn_id,))
         if not turn:
             return None
+        turn.update(_token_usage_fields(turn))
         events = self.database.query(
             """
             SELECT event_id, event_sequence, event_type, event_time_ms,
@@ -828,6 +1118,7 @@ class Analytics:
         )
         turn.update(self._turn_cost_fields(turn))
         for model in models:
+            model.update(_token_usage_fields(model))
             prices = self._pricing_for_model(str(model["model"]))
             model["configured_actual_usd"] = (
                 round(
@@ -855,7 +1146,8 @@ class Analytics:
                     ),
                     6,
                 )
-                if prices and all(key in prices for key in self._PRICE_FIELDS)
+                if prices
+                and all(prices.get(key) is not None for key in self._PRICE_FIELDS)
                 else None
             )
         return {"turn": turn, "events": events, "tools": tools, "models": models}

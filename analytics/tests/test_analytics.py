@@ -57,11 +57,15 @@ def test_complex_metrics_trends_comparison_and_breakdowns(database) -> None:
     assert overview["volume"]["turns"] == 2
     assert overview["volume"]["conversations"] == 1
     assert overview["volume"]["completion_rate"] == 0.5
-    assert overview["usage"]["total_tokens"] == 280
+    assert overview["usage"]["total_tokens"] == 360
     assert overview["usage"]["input_tokens"] == 200
     assert overview["usage"]["output_tokens"] == 80
     assert overview["usage"]["cache_read_input_tokens"] == 60
     assert overview["usage"]["cache_creation_input_tokens"] == 20
+    assert overview["usage"]["input_tokens_including_cache"] == 280
+    assert overview["usage"]["cache_hit_rate"] == 0.214286
+    assert overview["volume"]["turns_per_conversation"] == 2.0
+    assert overview["volume"]["devices"] == 0
     assert overview["cost"]["total_usd"] == 0.5
     assert overview["cost"]["actual_usd"] == 0.001893
     assert overview["cost"]["actual_source"] == "model_pricing_file"
@@ -74,6 +78,8 @@ def test_complex_metrics_trends_comparison_and_breakdowns(database) -> None:
         "cache_creation_usd": 0.000075,
     }
     assert overview["cost"]["estimated_usd"] == 0.001893
+    assert overview["cost"]["actual_per_turn_usd"] == 0.000946
+    assert overview["cost"]["actual_per_conversation_usd"] == 0.001893
     assert overview["tools"]["errors"] == 1
     assert overview["latency_ms"]["agent_p95"] == 9000
 
@@ -83,14 +89,23 @@ def test_complex_metrics_trends_comparison_and_breakdowns(database) -> None:
 
     trends = analytics.trends(period, "hour")
     assert trends["points"][0]["turns"] == 2
-    assert trends["points"][0]["tokens"] == 280
+    assert trends["points"][0]["tokens"] == 360
 
     breakdowns = analytics.breakdowns(period)
     assert breakdowns["models"][0]["turns"] == 2
     assert breakdowns["models"][0]["cost_usd"] == 0.5
+    assert breakdowns["models"][0]["total_tokens"] == 360
+    assert breakdowns["models"][0]["cache_hit_rate"] == 0.214286
     assert breakdowns["tools"][0]["calls"] == 2
     assert breakdowns["tools"][0]["errors"] == 1
     assert {item["value"] for item in breakdowns["statuses"]} == {"completed", "failed"}
+
+    activity = analytics.recent_activity(period)
+    tasks = activity["projects"][0]["conversations"][0]["tasks"]
+    assert [task["turn_id"] for task in tasks] == [
+        "turn-current-ok",
+        "turn-current-failed",
+    ]
 
 
 def test_conversation_turn_filters_detail_and_quality(database) -> None:
@@ -101,6 +116,16 @@ def test_conversation_turn_filters_detail_and_quality(database) -> None:
     conversations = analytics.conversations(period)
     assert conversations["pagination"]["total"] == 1
     assert conversations["items"][0]["turns"] == 1
+    assert conversations["items"][0]["total_tokens"] == 180
+    assert conversations["items"][0]["cache_hit_rate"] == 0.214286
+
+    activity = analytics.recent_activity(period)
+    assert activity["pagination"]["total"] == 1
+    assert activity["projects"][0]["project_id"] == "project_alpha"
+    assert activity["projects"][0]["conversations"][0]["turns"] == 1
+    activity_turn = activity["projects"][0]["conversations"][0]["tasks"][0]
+    assert activity_turn["user_message"] == "请创建温度仪表盘"
+    assert activity_turn["total_tokens"] == 180
 
     turns = analytics.turns(period, status="completed", tool_name="Read")
     assert turns["pagination"]["total"] == 1
@@ -114,6 +139,64 @@ def test_conversation_turn_filters_detail_and_quality(database) -> None:
     assert quality["turns"]["missing_terminal"] == 0
     assert quality["turns"]["missing_agent_result"] == 0
     assert quality["records"]["incomplete_events"] == 0
+
+
+def test_device_metrics_exclude_missing_mac_and_normalize_formats(database) -> None:
+    database.insert_logs(
+        complete_turn(
+            "turn-device-one",
+            conversation_id="conversation-device",
+            turn_index=1,
+            mac_address="aa-bb-cc-dd-ee-ff",
+        )
+    )
+    database.insert_logs(
+        complete_turn(
+            "turn-device-two",
+            base_time_ms=BASE_TIME_MS + 60_000,
+            conversation_id="conversation-device",
+            turn_index=2,
+            mac_address="AABB.CCDD.EEFF",
+        )
+    )
+    database.insert_logs(
+        complete_turn(
+            "turn-without-device",
+            base_time_ms=BASE_TIME_MS + 120_000,
+            conversation_id="conversation-without-device",
+        )
+    )
+    analytics = Analytics(
+        database,
+        "Asia/Shanghai",
+        model_pricing={
+            "claude-sonnet-test": {
+                "input": 3.0,
+                "output": 15.0,
+                "cache_read": 0.30,
+                "cache_creation": 3.75,
+            }
+        },
+    )
+    period = Period(BASE_TIME_MS, BASE_TIME_MS + DAY_MS)
+
+    assert analytics.overview(period)["volume"]["devices"] == 1
+    output = analytics.devices(period, page=1, page_size=1)
+    assert output["pagination"] == {
+        "page": 1,
+        "page_size": 1,
+        "total": 1,
+        "has_next": False,
+    }
+    device = output["items"][0]
+    assert device["mac_address"] == "AA:BB:CC:DD:EE:FF"
+    assert device["projects"] == 1
+    assert device["conversations"] == 1
+    assert device["turns"] == 2
+    assert device["total_tokens"] == 360
+    assert device["cache_hit_rate"] == 0.214286
+    assert device["configured_actual_usd"] == 0.001893
+    assert device["sdk_reported_usd"] == 0.24
 
 
 def test_cost_estimates_match_models_without_cross_model_fallback(database) -> None:
@@ -213,3 +296,25 @@ def test_period_labels_use_configured_timezone(database) -> None:
     output = analytics.overview(period)
     expected = datetime.fromtimestamp(BASE_TIME_MS / 1000, tz=ZoneInfo("Asia/Shanghai"))
     assert output["period"]["start"] == expected.isoformat()
+
+
+def test_null_model_prices_are_not_treated_as_complete(database) -> None:
+    database.insert_logs(complete_turn("turn-unpriced"))
+    analytics = Analytics(
+        database,
+        "Asia/Shanghai",
+        model_pricing={
+            "claude-sonnet-test": {
+                "input": None,
+                "output": None,
+                "cache_read": None,
+                "cache_creation": None,
+            }
+        },
+    )
+
+    summary = analytics.overview(Period(BASE_TIME_MS, BASE_TIME_MS + DAY_MS))
+
+    assert summary["cost"]["pricing_complete"] is False
+    assert summary["cost"]["actual_usd"] is None
+    assert summary["cost"]["actual_per_turn_usd"] is None

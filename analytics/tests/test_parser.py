@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import pytest
 
-from aiflow_analytics.parser import decode_event_payload, parse_record
+from aiflow_analytics.parser import (
+    decode_event_payload,
+    normalize_mac_address,
+    parse_record,
+)
 
 from .fixtures import event_records
 
@@ -37,3 +41,19 @@ def test_parser_ignores_other_event_names_and_rejects_bad_envelopes() -> None:
         parse_record(dict(log, schema_version="3"), 2)
     with pytest.raises(ValueError, match="missing envelope"):
         parse_record({key: value for key, value in log.items() if key != "turn_id"}, 2)
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("aabbccddeeff", "AA:BB:CC:DD:EE:FF"),
+        ("aa-bb-cc-dd-ee-ff", "AA:BB:CC:DD:EE:FF"),
+        ("aabb.ccdd.eeff", "AA:BB:CC:DD:EE:FF"),
+        ("  device-mac  ", "device-mac"),
+        (None, ""),
+        ("null", ""),
+        ("   ", ""),
+    ],
+)
+def test_normalize_mac_address(raw, expected) -> None:
+    assert normalize_mac_address(raw) == expected
