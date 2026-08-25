@@ -263,11 +263,25 @@ class AiQuotaClient:
         authorization: AiQuotaAuthorization,
         input_tokens: int,
         output_tokens: int,
+        cache_creation_input_tokens: int,
+        cache_read_input_tokens: int,
     ) -> dict[str, Any]:
         actual_tokens = data.get("actualTokens")
+        response_usage = (
+            (data.get("inputTokens"), input_tokens),
+            (data.get("outputTokens"), output_tokens),
+            (data.get("cacheCreationInputTokens"), cache_creation_input_tokens),
+            (data.get("cacheReadInputTokens"), cache_read_input_tokens),
+        )
         if (
             data.get("requestId") != authorization.request_id
             or data.get("settled") is not True
+            or any(
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or value != expected
+                for value, expected in response_usage
+            )
             or isinstance(actual_tokens, bool)
             or not isinstance(actual_tokens, int)
             or actual_tokens != input_tokens + output_tokens
@@ -380,13 +394,45 @@ class AiQuotaClient:
         authorization: AiQuotaAuthorization,
         input_tokens: int,
         output_tokens: int,
+        cache_creation_input_tokens: int,
+        cache_read_input_tokens: int,
     ) -> dict[str, Any]:
+        usage_values = (
+            input_tokens,
+            output_tokens,
+            cache_creation_input_tokens,
+            cache_read_input_tokens,
+        )
+        if not all(
+            isinstance(value, int) and not isinstance(value, bool) and value >= 0
+            for value in usage_values
+        ):
+            raise AiQuotaError(
+                "ai_quota_usage_invalid",
+                "AI quota settlement usage must contain non-negative integer token counts",
+                retryable=False,
+            )
+        if cache_creation_input_tokens + cache_read_input_tokens > input_tokens:
+            raise AiQuotaError(
+                "ai_quota_usage_invalid",
+                "AI quota cache token details cannot exceed total input tokens",
+                retryable=False,
+            )
+        if input_tokens + output_tokens > authorization.granted_tokens:
+            raise AiQuotaError(
+                "ai_quota_usage_exceeds_reservation",
+                "Trusted model token usage exceeded the authorized reservation",
+                retryable=False,
+                service_error_code="ACTUAL_TOKENS_EXCEED_RESERVATION",
+            )
         payload = {
             "authorizationId": authorization.authorization_id,
             "requestId": authorization.request_id,
             "model": self.settings.model,
             "inputTokens": input_tokens,
             "outputTokens": output_tokens,
+            "cacheCreationInputTokens": cache_creation_input_tokens,
+            "cacheReadInputTokens": cache_read_input_tokens,
         }
         last_error: AiQuotaError | None = None
         for _ in range(self.settings.max_attempts):
@@ -397,6 +443,8 @@ class AiQuotaClient:
                     authorization,
                     input_tokens,
                     output_tokens,
+                    cache_creation_input_tokens,
+                    cache_read_input_tokens,
                 )
             except AiQuotaError as exc:
                 last_error = exc
@@ -409,11 +457,27 @@ class AiQuotaClient:
                 raise last_error
             raise
         if state.get("status") == "SETTLED":
+            if state.get("authorizationId") not in {None, authorization.authorization_id}:
+                raise AiQuotaError(
+                    "ai_quota_invalid_response",
+                    "AI quota settlement status did not match the authorization",
+                    retryable=False,
+                )
             return self._validate_settlement(
-                {**state, "settled": True, "confirmedByStatus": True},
+                {
+                    **state,
+                    "settled": True,
+                    "inputTokens": input_tokens,
+                    "outputTokens": output_tokens,
+                    "cacheCreationInputTokens": cache_creation_input_tokens,
+                    "cacheReadInputTokens": cache_read_input_tokens,
+                    "confirmedByStatus": True,
+                },
                 authorization,
                 input_tokens,
                 output_tokens,
+                cache_creation_input_tokens,
+                cache_read_input_tokens,
             )
         if last_error is not None:
             raise last_error

@@ -31,6 +31,7 @@ const EVENT_TYPES = [
   "task_started",
   "ai_quota_authorized",
   "ai_quota_settled",
+  "ai_quota_settlement_pending",
   "ai_quota_released",
   "ai_quota_release_failed",
   "agent_connected",
@@ -69,6 +70,7 @@ const RUNTIME_EVENT_TYPES = new Set([
   "task_started",
   "ai_quota_authorized",
   "ai_quota_settled",
+  "ai_quota_settlement_pending",
   "ai_quota_released",
   "ai_quota_release_failed",
   "cancellation_requested",
@@ -87,6 +89,7 @@ const EVENT_LABELS = {
   task_started: "任务启动",
   ai_quota_authorized: "AI 额度授权",
   ai_quota_settled: "AI 额度结算",
+  ai_quota_settlement_pending: "AI 额度待核对",
   ai_quota_released: "AI 额度释放",
   ai_quota_release_failed: "AI 额度异常",
   cancellation_requested: "取消请求",
@@ -731,7 +734,10 @@ function eventMessage(type, event) {
     return data.stage === "authorizing_ai_quota" ? "任务已开始，正在检查 AI Token 额度" : "任务已开始，正在准备独立工作区";
   }
   if (type === "ai_quota_authorized") return `AI Token 额度已放行，本次最多 ${data.granted_tokens ?? "--"} Token`;
-  if (type === "ai_quota_settled") return `AI Token 已结算，共 ${data.actual_tokens ?? "--"} Token`;
+  if (type === "ai_quota_settled") {
+    return `AI Token 已结算，共 ${data.actual_tokens ?? "--"} Token（输入 ${data.input_tokens ?? "--"}，输出 ${data.output_tokens ?? "--"}，缓存创建 ${data.cache_creation_input_tokens ?? 0}，缓存读取 ${data.cache_read_input_tokens ?? 0}）`;
+  }
+  if (type === "ai_quota_settlement_pending") return "模型可能已产生用量，额度预占保留等待核对";
   if (type === "ai_quota_released") return "未完成请求的 AI Token 预占已释放";
   if (type === "ai_quota_release_failed") return "AI Token 预占释放状态暂未确认";
   if (type === "cancellation_requested") return "已提交取消请求，等待当前操作停止";
@@ -898,7 +904,7 @@ function appendRuntimeEvent(type, event) {
   const key = type === "heartbeat" ? "heartbeat" : type.startsWith("stream_") ? "event_stream" : type;
   const tone = type.includes("failed") || type === "task_stalled" ? "error" :
     type === "task_completed" || type === "stream_connected" || type === "ai_quota_settled" ? "success" :
-      type === "stream_reconnecting" ? "warning" : "";
+      type === "stream_reconnecting" || type === "ai_quota_settlement_pending" ? "warning" : "";
   const message = type === "heartbeat" ? heartbeatMessage(data) : eventMessage(type, event);
   const details = type === "task_failed" ? data.error || data :
     type === "task_completed" ? { result: data.result } :

@@ -12,6 +12,7 @@ from aiflow_server.ai_quota import (
     AiQuotaAuthorization,
     AiQuotaClient,
     AiQuotaDenied,
+    AiQuotaError,
     build_hmac_headers,
 )
 from aiflow_server.config import AiQuotaSettings
@@ -195,6 +196,10 @@ def test_settle_retries_identical_business_body_with_fresh_nonce():
                 "data": {
                     "settled": True,
                     "requestId": "task_settle",
+                    "inputTokens": 10,
+                    "outputTokens": 5,
+                    "cacheCreationInputTokens": 2,
+                    "cacheReadInputTokens": 3,
                     "actualTokens": 15,
                     "releasedTokens": 499985,
                 },
@@ -218,12 +223,13 @@ def test_settle_retries_identical_business_body_with_fresh_nonce():
             expires_at="2026-08-25T12:10:00+08:00",
             quota={},
         )
-        result = await client.settle(authorization, 10, 5)
+        result = await client.settle(authorization, 10, 5, 2, 3)
         await http_client.aclose()
         return result
 
     result = asyncio.run(exercise())
     assert result["settled"] is True
+    assert json.loads(bodies[0])["cacheReadInputTokens"] == 3
     assert bodies[0] == bodies[1]
     assert nonces == ["settle-nonce-1", "settle-nonce-2"]
 
@@ -272,7 +278,7 @@ def test_settle_mismatched_success_response_recovers_from_status():
             expires_at="2026-08-25T12:10:00+08:00",
             quota={},
         )
-        result = await client.settle(authorization, 10, 5)
+        result = await client.settle(authorization, 10, 5, 2, 3)
         await http_client.aclose()
         return result
 
@@ -283,6 +289,84 @@ def test_settle_mismatched_success_response_recovers_from_status():
         "/m5stack/internal/v1/aiQuota/settle",
         "/m5stack/internal/v1/aiQuota/status/task_settle_status",
     ]
+
+
+def test_settle_rejects_response_with_mismatched_cache_usage():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/settle"):
+            return httpx.Response(
+                200,
+                json={
+                    "code": 200,
+                    "msg": "",
+                    "data": {
+                        "settled": True,
+                        "requestId": "task_cache_mismatch",
+                        "inputTokens": 10,
+                        "outputTokens": 5,
+                        "cacheCreationInputTokens": 1,
+                        "cacheReadInputTokens": 3,
+                        "actualTokens": 15,
+                    },
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "code": 200,
+                "msg": "",
+                "data": {
+                    "requestId": "task_cache_mismatch",
+                    "authorizationId": "qa_cache_mismatch",
+                    "status": "RESERVED",
+                    "reservedTokens": 500000,
+                    "expiresAt": "2026-08-25T12:10:00+08:00",
+                },
+            },
+        )
+
+    async def exercise():
+        http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        client = AiQuotaClient(quota_settings(), client=http_client)
+        authorization = AiQuotaAuthorization(
+            request_id="task_cache_mismatch",
+            authorization_id="qa_cache_mismatch",
+            granted_tokens=500000,
+            expires_at="2026-08-25T12:10:00+08:00",
+            quota={},
+        )
+        with pytest.raises(AiQuotaError) as captured:
+            await client.settle(authorization, 10, 5, 2, 3)
+        await http_client.aclose()
+        return captured.value
+
+    error = asyncio.run(exercise())
+    assert error.code == "ai_quota_invalid_response"
+
+
+def test_settle_rejects_usage_over_granted_tokens_before_http_request():
+    requests: list[httpx.Request] = []
+
+    async def exercise():
+        http_client = httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda request: requests.append(request))
+        )
+        client = AiQuotaClient(quota_settings(), client=http_client)
+        authorization = AiQuotaAuthorization(
+            request_id="task_over_limit",
+            authorization_id="qa_over_limit",
+            granted_tokens=12,
+            expires_at="2026-08-25T12:10:00+08:00",
+            quota={},
+        )
+        with pytest.raises(AiQuotaError) as captured:
+            await client.settle(authorization, 10, 5, 2, 3)
+        await http_client.aclose()
+        return captured.value
+
+    error = asyncio.run(exercise())
+    assert error.code == "ai_quota_usage_exceeds_reservation"
+    assert requests == []
 
 
 def test_release_validates_authorization_identity():

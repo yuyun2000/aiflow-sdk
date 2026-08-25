@@ -253,13 +253,14 @@ inputs/<conversation_id>/<task_id>/question.wav
 ```text
 authorize(task_id, device MAC, deepseek-pro, requestedTokens)
   -> allowed=true 才调用 Claude/DeepSeek Agent
-  -> 成功后用 SDK input_tokens + output_tokens 调用 settle
-  -> Agent 失败或取消时调用 release
+  -> inputTokens = SDK input_tokens + cache_creation_input_tokens + cache_read_input_tokens
+  -> 成功后用 inputTokens、output_tokens 和两项缓存明细调用 settle
+  -> 失败或取消：未调用模型才 release；已有 usage 则 settle；usage 未知时保留待核对
 ```
 
 授权发生在后台任务中，因此正常创建仍返回 `202`；额度不足通过任务 `error.code=ai_quota_denied`、`quota_reason` 和非敏感 `quota` 返回。鉴权未配置、HMAC/网络异常或结算无法确认也会使任务失败，不会在不确认授权时调用模型。服务用 `task_id` 作为幂等 quota `requestId`，每次 HTTP 重试使用新 nonce；授权、结算和释放超时按内部 `status` 确认。内部 `authorizationId` 只存于服务端 SQLite，不进入公开 API 或 TLS 对话日志。
 
-默认申请上游单次上限 `500000` Token，并在 `expires_at` 前 5 秒中止仍未结束的 Agent。Claude Agent 是多轮请求，最终结算使用 SDK 返回的整轮可信 usage；浏览器不能提交 Token 数。上游当前不支持续期或超过 500K 的单次结算，因此客户端不应自动重试 `ai_quota_usage_missing`、`ai_quota_authorization_expired` 或结算冲突，需由服务端运维核查。
+默认申请上游单次上限 `500000` Token，并在 `expires_at` 前 5 秒中止仍未结束的 Agent。Claude Agent 是多轮请求，最终结算使用 SDK 返回的整轮可信 usage；`input_tokens` 对外表示包含缓存创建和缓存读取的输入总量，两项缓存字段只是分类明细，不会再次加入 `actual_tokens=input_tokens+output_tokens`。浏览器不能提交 Token 数。上游当前不支持续期或超过 500K 的单次结算，因此客户端不应自动重试 `ai_quota_usage_missing`、`ai_quota_authorization_expired`、`ai_quota_usage_exceeds_reservation` 或结算冲突，需由服务端运维核查。
 
 ### `POST /api/v3/asr`
 
@@ -427,9 +428,21 @@ queued -> running -> completed
 - 输出：`assistant_message_started`、`assistant_text_delta`、`assistant_message`、`assistant_message_finished`；模型思考为 `agent_reasoning`，中断兜底为 `agent_partial_capture`。
 - 工具：`tool_started`、`tool_finished`、`server_tool_started`、`server_tool_finished`、`agent_user_message`、`agent_user_content`。
 - 原始流状态：`agent_stream_event`。
-- 服务任务：`task_queued`、`task_started`、`ai_quota_authorized`、`ai_quota_settled`、`ai_quota_released`、`ai_quota_release_failed`、`file_ready`、`deployment_started`、`deployment_finished`、`cancellation_requested`、`task_completed`、`task_failed`、`task_cancelled`、`heartbeat`。
+- 服务任务：`task_queued`、`task_started`、`ai_quota_authorized`、`ai_quota_settled`、`ai_quota_settlement_pending`、`ai_quota_released`、`ai_quota_release_failed`、`file_ready`、`deployment_started`、`deployment_finished`、`cancellation_requested`、`task_completed`、`task_failed`、`task_cancelled`、`heartbeat`。
 
-额度事件只公开批准/结算 Token 数、剩余额度摘要、到期时间和释放原因。客户端可以展示这些事件，但 `GET /api/v3/tasks/{task_id}` 仍是终态权威来源。`ai_quota_release_failed` 表示释放结果未知；服务会保留 SQLite 预占记录供重启补偿，上游也会在授权过期后自动释放。
+额度事件只公开批准/结算 Token 数、剩余额度摘要、到期时间和释放原因。客户端可以展示这些事件，但 `GET /api/v3/tasks/{task_id}` 仍是终态权威来源。`ai_quota_settled.data` 的稳定用量字段如下：
+
+```json
+{
+  "input_tokens": 120000,
+  "output_tokens": 80000,
+  "cache_creation_input_tokens": 30000,
+  "cache_read_input_tokens": 70000,
+  "actual_tokens": 200000
+}
+```
+
+`input_tokens` 已包含普通输入、缓存创建和缓存读取 Token；缓存字段是其中的分类明细，客户端不得再次求和。`ai_quota_settlement_pending` 表示模型可能已产生用量，但结算尚未确认或 usage 未知，服务不会盲目释放预占。`ai_quota_release_failed` 表示确认零消费后的释放结果未知。两类异常都会保留 SQLite 记录供重启补偿，上游也会在授权过期后自动释放。
 
 Agent 的所有公开文本块使用用户本人最近一条可识别的自然语言；用户明确指定回复语言时优先。服务不会根据 UIFlow/API 术语、Skill/MCP、官方文档、代码、日志或工具结果的语种切换回复语言。混合语言请求以用户自然语言句子的主体为准，代码、命令、API 名称、标识符和产品名在直译不自然时保留原文。当前请求无语种信号时沿用会话中最近的用户语种；全新且只有附件的请求使用客户端默认简体中文。
 

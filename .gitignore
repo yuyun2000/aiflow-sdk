@@ -11,3 +11,4 @@ server_config.local.json
 .env.*.local
 client-keys.json
 *.client-keys.json
+*.pem

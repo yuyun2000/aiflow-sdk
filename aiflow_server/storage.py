@@ -127,6 +127,8 @@ class Storage:
                     status TEXT NOT NULL,
                     input_tokens INTEGER,
                     output_tokens INTEGER,
+                    cache_creation_input_tokens INTEGER,
+                    cache_read_input_tokens INTEGER,
                     expires_at TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
@@ -152,6 +154,7 @@ class Storage:
             )
             self._migrate_context_columns(db)
             self._migrate_task_trace_columns(db)
+            self._migrate_ai_quota_columns(db)
             initialize_tls_outbox(db)
             now = utc_now()
             interrupted = db.execute(
@@ -327,6 +330,43 @@ class Storage:
                 (candidate, row["context_id"]),
             )
         db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_contexts_device_id ON contexts(device_id)")
+
+    @staticmethod
+    def _migrate_ai_quota_columns(db: sqlite3.Connection) -> None:
+        columns = {
+            row["name"]
+            for row in db.execute("PRAGMA table_info(ai_quota_reservations)").fetchall()
+        }
+        missing_cache_columns = not {
+            "cache_creation_input_tokens",
+            "cache_read_input_tokens",
+        }.issubset(columns)
+        if "cache_creation_input_tokens" not in columns:
+            db.execute(
+                "ALTER TABLE ai_quota_reservations ADD COLUMN cache_creation_input_tokens INTEGER"
+            )
+        if "cache_read_input_tokens" not in columns:
+            db.execute(
+                "ALTER TABLE ai_quota_reservations ADD COLUMN cache_read_input_tokens INTEGER"
+            )
+        if missing_cache_columns:
+            db.execute(
+                """
+                UPDATE ai_quota_reservations
+                SET status='USAGE_UNKNOWN', updated_at=?
+                WHERE status IN ('SETTLEMENT_REQUIRED', 'SETTLING')
+                   OR (
+                        status='RESERVED'
+                        AND EXISTS (
+                            SELECT 1 FROM tasks
+                            WHERE tasks.task_id=ai_quota_reservations.task_id
+                              AND tasks.status NOT IN ('completed', 'failed', 'cancelled')
+                              AND tasks.stage='coding'
+                        )
+                   )
+                """,
+                (utc_now(),),
+            )
 
     @staticmethod
     def _migrate_task_trace_columns(db: sqlite3.Connection) -> None:
@@ -630,6 +670,8 @@ class Storage:
         *,
         input_tokens: int | None = None,
         output_tokens: int | None = None,
+        cache_creation_input_tokens: int | None = None,
+        cache_read_input_tokens: int | None = None,
         authorization_id: str | None = None,
         granted_tokens: int | None = None,
         expires_at: str | None = None,
@@ -639,6 +681,8 @@ class Storage:
         optional = {
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
+            "cache_creation_input_tokens": cache_creation_input_tokens,
+            "cache_read_input_tokens": cache_read_input_tokens,
             "authorization_id": authorization_id,
             "granted_tokens": granted_tokens,
             "expires_at": expires_at,
@@ -667,7 +711,10 @@ class Storage:
             rows = db.execute(
                 """
                 SELECT * FROM ai_quota_reservations
-                WHERE status IN ('AUTHORIZING', 'RESERVED', 'SETTLING')
+                WHERE status IN (
+                    'AUTHORIZING', 'RESERVED', 'USAGE_UNKNOWN',
+                    'SETTLEMENT_REQUIRED', 'SETTLING'
+                )
                 ORDER BY created_at ASC
                 """
             ).fetchall()

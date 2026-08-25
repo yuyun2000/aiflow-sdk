@@ -99,7 +99,7 @@ AIFLOW_WEB_COOKIE_SECURE="true"
 - 修改请求必须来自同源或 `server.cors_origins` 明确允许的 Origin，减少 CSRF 和站外盗用。
 - 网关同时按签名匿名会话与来源 IP 限制普通请求和 AI 任务；清 cookie 不能绕过 IP 日限额。
 - 核心继续执行全局 AI 日限额、单进程有界队列和同设备单任务约束。
-- Coding 获得执行槽后先按设备 MAC 向 m5stack 额度服务预占 Token；只有 `allowed=true` 才启动 Agent，可信 SDK usage 返回后结算，失败或取消时释放。`direct-run` 不调用模型，因此不走额度接口。
+- Coding 获得执行槽后先按设备 MAC 向 m5stack 额度服务预占 Token；只有 `allowed=true` 才启动 Agent。结算输入量为 SDK `input_tokens + cache_creation_input_tokens + cache_read_input_tokens`，再加 `output_tokens` 得到实际总量，缓存明细不会重复扣减。失败或取消时，确认模型未调用才释放；已有可信 usage 则结算；模型可能已调用但 usage 未知时保留预占等待补偿。`direct-run` 不调用模型，因此不走额度接口。
 - 对公网高流量场景，在 Nginx/CDN 再加 IP/ASN 限速、异常封禁和 Turnstile/验证码。无登录产品想进一步限制机器人，这一层不可省略。
 
 限额在 [server_config.json](server_config.json) 的 `web_gateway` 和 `cost_guard` 中机械配置。`./manage.sh config` 会打印当前值且不显示模型密钥。完整边界见 [CLIENT_SECURITY.md](docs/CLIENT_SECURITY.md)。
@@ -134,7 +134,7 @@ AIFLOW_AI_QUOTA_HMAC_SECRET="<use-the-shared-secret-provided-out-of-band>"
 - `AIFLOW_CLAUDE_SUPPORTS_IMAGE_INPUT`：模型是否支持图片输入。DeepSeek 等纯文本模型设为 `false`；默认 `true`。
 - `AIFLOW_AI_QUOTA_HMAC_SECRET`：m5stack 免费 Token 额度服务的共享密钥，只能放在 `.env.local` 或外部环境文件。额度保护默认启用；缺少密钥、签名失败、网络结果未知或 `allowed=false` 时均在调用模型前失败关闭。
 
-`server_config.json -> ai_quota` 保存非敏感默认值。当前固定以 `deepseek-pro` 申请单次上限 `500000` Token，尽量覆盖 Claude Agent 多轮累计 usage；可用 `AIFLOW_AI_QUOTA_REQUESTED_TOKENS` 下调，但不能超过上游单次上限。授权在任务真正获得执行槽后才申请，避免排队消耗 10 分钟有效期。Agent 超过授权有效期仍未结束时会被中止；可信 usage 会在调用结算接口前持久化，服务重启后会释放尚未调用模型的预占，并重试已经完成模型调用的待结算记录。
+`server_config.json -> ai_quota` 保存非敏感默认值。当前固定以 `deepseek-pro` 申请单次上限 `500000` Token，尽量覆盖 Claude Agent 多轮累计 usage；可用 `AIFLOW_AI_QUOTA_REQUESTED_TOKENS` 下调，但不能超过上游单次上限。授权在任务真正获得执行槽后才申请，避免排队消耗 10 分钟有效期。Agent 超过授权有效期仍未结束时会被中止；四项可信 usage 会在调用结算接口前持久化。服务重启后会释放确认尚未调用模型的预占，使用完全相同的 usage 重试待结算记录，并保留用量未知的记录而不盲目按零消费释放。
 
 `.env.local` 默认不进入 Git。也可以通过 `AIFLOW_ENV_FILE=/secure/path/provider.env` 指向部署环境生成的配置文件。修改后检查并重启：
 

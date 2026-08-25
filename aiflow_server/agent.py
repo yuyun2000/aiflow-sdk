@@ -1230,6 +1230,7 @@ class ClaudeRunner:
                 )
                 if cancel_event.is_set():
                     raise AgentCancelled()
+                await emit("model_request_started", {"stage": "coding"})
                 await client.query(user_prompt)
 
                 async for message in client.receive_response():

@@ -188,6 +188,7 @@ function watchTask(task, handlers) {
   const source = new EventSource(url);
   const types = [
     "task_queued", "task_started", "ai_quota_authorized", "ai_quota_settled",
+    "ai_quota_settlement_pending",
     "ai_quota_released", "ai_quota_release_failed", "agent_connected", "agent_system",
     "agent_status", "agent_warning", "agent_reasoning", "agent_partial_capture",
     "agent_stream_event",
@@ -233,7 +234,7 @@ async function getTask(deviceId, taskId) {
 
 状态中的 `queue_position`、`stage`、`possibly_stalled` 是权威生命周期信息。`progress` 是兼容字段，只会在排队/运行时为 `0`、终态为 `100`；它不是模型完成百分比，客户端不得显示成 20%、50% 等进度，也不得据此推测模型正在做什么。`possibly_stalled=true` 时展示警告和取消按钮，不要自动重复请求。
 
-额度事件不包含内部 `requestId`、`authorizationId`、MAC 或签名。`ai_quota_settled` 的 `input_tokens/output_tokens` 来自服务端收到的可信 SDK usage；前端只展示，不能上报或覆盖。`direct-run` 不产生模型费用，因此不会出现这些额度事件。
+额度事件不包含内部 `requestId`、`authorizationId`、MAC 或签名。`ai_quota_settled` 的 `input_tokens`、`output_tokens`、`cache_creation_input_tokens`、`cache_read_input_tokens` 来自服务端收到的可信 SDK usage；其中 `input_tokens` 已包含两项缓存 Token，`actual_tokens=input_tokens+output_tokens`，前端不能重复加入缓存明细。前端只展示这些数字，不能上报或覆盖。`ai_quota_settlement_pending` 表示任务虽已失败或取消，但模型可能已经产生费用，服务端保留预占等待补偿；客户端不得据此自动重试任务。`direct-run` 不产生模型费用，因此不会出现这些额度事件。
 
 ## 7. deviceId 项目与历史恢复
 
