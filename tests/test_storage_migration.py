@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
+from dataclasses import replace
 
+from aiflow_server.config import load_settings
 from aiflow_server.storage import Storage, hash_token
+from aiflow_server.tasks import TaskManager
 
 
 def test_storage_uses_wal_with_normal_synchronous_mode(tmp_path):
@@ -150,3 +154,220 @@ def test_restart_marks_interrupted_task_with_terminal_event(tmp_path):
     assert recovered["turn_index"] == 1
     assert restarted.last_event(task["task_id"])["type"] == "task_failed"
     assert restarted.last_event(task["task_id"])["data"]["error"]["code"] == "server_restarted"
+
+
+def test_ai_quota_reservation_survives_restart_for_release_reconciliation(tmp_path):
+    database = tmp_path / "aiflow.sqlite3"
+    storage = Storage(database)
+    storage.connect_context(
+        "ctx_quota_restart",
+        "context-token",
+        "conv_quota_restart",
+        "quota restart fixture",
+        {
+            "device_id": "device-quota-restart",
+            "client_id": "client-quota-restart",
+            "mac_address": "AA:BB:CC:DD:EE:FF",
+        },
+        max_sessions=10,
+    )
+    storage.create_task(
+        "task_quota_restart",
+        "ctx_quota_restart",
+        "stream-token",
+        "coding",
+        {"prompt": "unfinished quota task", "attachments": []},
+    )
+    storage.begin_ai_quota_request(
+        "task_quota_restart",
+        "task_quota_restart",
+        "deepseek-pro",
+    )
+    storage.authorize_ai_quota(
+        "task_quota_restart",
+        "qa_restart_authorization",
+        500000,
+        "2026-08-25T12:10:00+08:00",
+    )
+    storage.update_task("task_quota_restart", status="running", stage="coding")
+
+    restarted = Storage(database)
+
+    open_reservations = restarted.list_open_ai_quota_reservations()
+    assert len(open_reservations) == 1
+    assert open_reservations[0]["task_id"] == "task_quota_restart"
+    assert open_reservations[0]["status"] == "RESERVED"
+    restarted.update_ai_quota_status(
+        "task_quota_restart",
+        "SETTLED",
+        input_tokens=12,
+        output_tokens=3,
+    )
+    saved = restarted.get_ai_quota_reservation("task_quota_restart")
+    assert saved["status"] == "SETTLED"
+    assert saved["input_tokens"] == 12
+    assert saved["output_tokens"] == 3
+    assert restarted.list_open_ai_quota_reservations() == []
+
+
+def test_task_manager_releases_persisted_quota_reservation_after_restart(tmp_path):
+    database = tmp_path / "aiflow.sqlite3"
+    storage = Storage(database)
+    storage.connect_context(
+        "ctx_quota_reconcile",
+        "context-token",
+        "conv_quota_reconcile",
+        "quota reconcile fixture",
+        {
+            "device_id": "device-quota-reconcile",
+            "client_id": "client-quota-reconcile",
+            "mac_address": "AA:BB:CC:DD:EE:FF",
+        },
+        max_sessions=10,
+    )
+    storage.create_task(
+        "task_quota_reconcile",
+        "ctx_quota_reconcile",
+        "stream-token",
+        "coding",
+        {"prompt": "unfinished quota task", "attachments": []},
+    )
+    storage.begin_ai_quota_request(
+        "task_quota_reconcile",
+        "task_quota_reconcile",
+        "deepseek-pro",
+    )
+    storage.authorize_ai_quota(
+        "task_quota_reconcile",
+        "qa_reconcile_authorization",
+        500000,
+        "2026-08-25T12:10:00+08:00",
+    )
+    storage.update_task("task_quota_reconcile", status="running", stage="coding")
+    restarted = Storage(database)
+
+    class ReconcileQuotaClient:
+        def __init__(self):
+            self.calls = []
+
+        async def release(self, authorization, reason):
+            self.calls.append((authorization.request_id, authorization.authorization_id, reason))
+            return {"status": "RELEASED"}
+
+    base = load_settings()
+    settings = replace(
+        base,
+        data_dir=tmp_path,
+        ai_quota=replace(
+            base.ai_quota,
+            enabled=True,
+            hmac_secret="fake-quota-secret-with-at-least-32-bytes",
+        ),
+    )
+    quota = ReconcileQuotaClient()
+    manager = TaskManager(
+        settings,
+        restarted,
+        None,
+        None,
+        None,
+        quota_client=quota,
+    )
+
+    asyncio.run(manager._reconcile_ai_quota_reservations())
+
+    assert quota.calls == [
+        (
+            "task_quota_reconcile",
+            "qa_reconcile_authorization",
+            "AIFLOW_REQUEST_FAILED",
+        )
+    ]
+    assert restarted.get_task("task_quota_reconcile")["error"]["code"] == "server_restarted"
+    assert restarted.get_ai_quota_reservation("task_quota_reconcile")["status"] == "RELEASED"
+
+
+def test_task_manager_settles_persisted_model_usage_after_restart(tmp_path):
+    database = tmp_path / "aiflow.sqlite3"
+    storage = Storage(database)
+    storage.connect_context(
+        "ctx_quota_settle",
+        "context-token",
+        "conv_quota_settle",
+        "quota settle fixture",
+        {
+            "device_id": "device-quota-settle",
+            "client_id": "client-quota-settle",
+            "mac_address": "AA:BB:CC:DD:EE:FF",
+        },
+        max_sessions=10,
+    )
+    storage.create_task(
+        "task_quota_settle",
+        "ctx_quota_settle",
+        "stream-token",
+        "coding",
+        {"prompt": "completed model request", "attachments": []},
+    )
+    storage.begin_ai_quota_request(
+        "task_quota_settle",
+        "task_quota_settle",
+        "deepseek-pro",
+    )
+    storage.authorize_ai_quota(
+        "task_quota_settle",
+        "qa_settle_authorization",
+        500000,
+        "2026-08-25T12:10:00+08:00",
+    )
+    storage.update_ai_quota_status(
+        "task_quota_settle",
+        "SETTLING",
+        input_tokens=12,
+        output_tokens=3,
+    )
+    storage.update_task("task_quota_settle", status="running", stage="coding")
+    restarted = Storage(database)
+
+    class ReconcileQuotaClient:
+        def __init__(self):
+            self.settle_calls = []
+            self.release_calls = []
+
+        async def settle(self, authorization, input_tokens, output_tokens):
+            self.settle_calls.append(
+                (authorization.request_id, authorization.authorization_id, input_tokens, output_tokens)
+            )
+            return {"settled": True}
+
+        async def release(self, authorization, reason):
+            self.release_calls.append((authorization.request_id, reason))
+            return {"status": "RELEASED"}
+
+    base = load_settings()
+    settings = replace(
+        base,
+        data_dir=tmp_path,
+        ai_quota=replace(
+            base.ai_quota,
+            enabled=True,
+            hmac_secret="fake-quota-secret-with-at-least-32-bytes",
+        ),
+    )
+    quota = ReconcileQuotaClient()
+    manager = TaskManager(
+        settings,
+        restarted,
+        None,
+        None,
+        None,
+        quota_client=quota,
+    )
+
+    asyncio.run(manager._reconcile_ai_quota_reservations())
+
+    assert quota.settle_calls == [
+        ("task_quota_settle", "qa_settle_authorization", 12, 3)
+    ]
+    assert quota.release_calls == []
+    assert restarted.get_ai_quota_reservation("task_quota_settle")["status"] == "SETTLED"

@@ -47,6 +47,7 @@ def test_agent_activity_timestamp_is_throttled_without_task_reads():
             object(),
             object(),
             object(),
+            quota_client=object(),
         )
 
         await manager._emit("task-1", "assistant_text_delta", {"text": "a"}, agent_event=True)

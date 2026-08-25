@@ -89,6 +89,7 @@ def test_official_client_signature_replay_body_integrity_and_cost_guard(tmp_path
         max_ai_tasks_per_client_minute=1,
         max_ai_tasks_per_client_day=10,
         max_ai_tasks_global_day=10,
+        ai_quota=replace(base.ai_quota, enabled=False),
     )
     app = create_app(settings, runner=ImmediateRunner())
 

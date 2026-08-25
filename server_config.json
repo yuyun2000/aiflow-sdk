@@ -16,6 +16,15 @@
     "max_ai_tasks_per_client_day": 200,
     "max_ai_tasks_global_day": 1000
   },
+  "ai_quota": {
+    "enabled": true,
+    "base_url": "https://uiflow2.m5stack.com/m5stack/internal/v1/aiQuota",
+    "client_id": "uiflow-aiflow-prod",
+    "model": "deepseek-pro",
+    "requested_tokens": 500000,
+    "timeout_seconds": 5,
+    "max_attempts": 2
+  },
   "web_gateway": {
     "require_same_origin": true,
     "cookie_secure": false,

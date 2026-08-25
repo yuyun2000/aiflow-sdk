@@ -118,6 +118,21 @@ class Storage:
                     FOREIGN KEY(task_id) REFERENCES tasks(task_id) ON DELETE CASCADE
                 );
                 CREATE INDEX IF NOT EXISTS idx_events_task_sequence ON task_events(task_id, sequence);
+                CREATE TABLE IF NOT EXISTS ai_quota_reservations (
+                    task_id TEXT PRIMARY KEY,
+                    request_id TEXT NOT NULL UNIQUE,
+                    authorization_id TEXT UNIQUE,
+                    model TEXT NOT NULL,
+                    granted_tokens INTEGER,
+                    status TEXT NOT NULL,
+                    input_tokens INTEGER,
+                    output_tokens INTEGER,
+                    expires_at TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY(task_id) REFERENCES tasks(task_id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_ai_quota_status ON ai_quota_reservations(status);
                 CREATE TABLE IF NOT EXISTS client_nonces (
                     key_id TEXT NOT NULL,
                     nonce_hash TEXT NOT NULL,
@@ -576,6 +591,87 @@ class Storage:
         with self.connect() as db:
             row = db.execute("SELECT * FROM tasks WHERE task_id=?", (task_id,)).fetchone()
         return self._task_row(row) if row else None
+
+    def begin_ai_quota_request(self, task_id: str, request_id: str, model: str) -> None:
+        now = utc_now()
+        with self.connect() as db:
+            db.execute(
+                """
+                INSERT INTO ai_quota_reservations(
+                    task_id, request_id, model, status, created_at, updated_at
+                ) VALUES (?, ?, ?, 'AUTHORIZING', ?, ?)
+                ON CONFLICT(task_id) DO UPDATE SET updated_at=excluded.updated_at
+                """,
+                (task_id, request_id, model, now, now),
+            )
+
+    def authorize_ai_quota(
+        self,
+        task_id: str,
+        authorization_id: str,
+        granted_tokens: int,
+        expires_at: str | None,
+    ) -> None:
+        with self.connect() as db:
+            db.execute(
+                """
+                UPDATE ai_quota_reservations
+                SET authorization_id=?, granted_tokens=?, expires_at=?,
+                    status='RESERVED', updated_at=?
+                WHERE task_id=?
+                """,
+                (authorization_id, granted_tokens, expires_at, utc_now(), task_id),
+            )
+
+    def update_ai_quota_status(
+        self,
+        task_id: str,
+        status: str,
+        *,
+        input_tokens: int | None = None,
+        output_tokens: int | None = None,
+        authorization_id: str | None = None,
+        granted_tokens: int | None = None,
+        expires_at: str | None = None,
+    ) -> None:
+        assignments = ["status=?", "updated_at=?"]
+        values: list[Any] = [status, utc_now()]
+        optional = {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "authorization_id": authorization_id,
+            "granted_tokens": granted_tokens,
+            "expires_at": expires_at,
+        }
+        for name, value in optional.items():
+            if value is not None:
+                assignments.append(f"{name}=?")
+                values.append(value)
+        values.append(task_id)
+        with self.connect() as db:
+            db.execute(
+                f"UPDATE ai_quota_reservations SET {', '.join(assignments)} WHERE task_id=?",
+                values,
+            )
+
+    def get_ai_quota_reservation(self, task_id: str) -> dict[str, Any] | None:
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT * FROM ai_quota_reservations WHERE task_id=?",
+                (task_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def list_open_ai_quota_reservations(self) -> list[dict[str, Any]]:
+        with self.connect() as db:
+            rows = db.execute(
+                """
+                SELECT * FROM ai_quota_reservations
+                WHERE status IN ('AUTHORIZING', 'RESERVED', 'SETTLING')
+                ORDER BY created_at ASC
+                """
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def get_owned_task(self, task_id: str, context_id: str) -> dict[str, Any] | None:
         with self.connect() as db:

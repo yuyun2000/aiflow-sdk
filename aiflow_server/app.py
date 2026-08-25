@@ -30,6 +30,7 @@ from fastapi.staticfiles import StaticFiles
 
 from . import __version__
 from .agent import ClaudeRunner, _event_secrets, _sanitize_event
+from .ai_quota import AiQuotaClient
 from .asr import AsrError, SaucAsrClient
 from .config import Settings, load_settings
 from .device_push import DeploymentError, DevicePusher
@@ -119,6 +120,7 @@ def create_app(
     runner: ClaudeRunner | None = None,
     pusher: DevicePusher | None = None,
     asr_client: SaucAsrClient | None = None,
+    quota_client: AiQuotaClient | None = None,
 ) -> FastAPI:
     configured = settings or load_settings()
     telemetry = TlsTelemetry(configured.tls_logging, configured.database_path)
@@ -132,6 +134,7 @@ def create_app(
     effective_runner = runner or ClaudeRunner(configured, workspaces)
     effective_pusher = pusher or DevicePusher(configured, workspaces)
     effective_asr_client = asr_client or SaucAsrClient(configured.asr)
+    effective_quota_client = quota_client or AiQuotaClient(configured.ai_quota)
     tasks = TaskManager(
         configured,
         storage,
@@ -139,12 +142,14 @@ def create_app(
         effective_runner,
         effective_pusher,
         telemetry,
+        effective_quota_client,
     )
     client_auth = ClientAuthenticator(configured, storage)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         telemetry.start()
+        await tasks.startup()
         try:
             yield
         finally:
@@ -165,6 +170,7 @@ def create_app(
     app.state.client_auth = client_auth
     app.state.telemetry = telemetry
     app.state.asr_client = effective_asr_client
+    app.state.quota_client = effective_quota_client
 
     @app.middleware("http")
     async def authenticate_official_client(request: Request, call_next):
@@ -278,6 +284,7 @@ def create_app(
                 "base64_image_audio_messages",
                 "sauc_nostream_asr",
                 "sauc_nostream_asr_stream_upload",
+                "ai_free_token_quota",
             ],
         }
 
@@ -520,6 +527,14 @@ def create_app(
         http_request: Request,
         context: dict[str, Any] = Depends(require_context),
     ) -> TaskCreatedResponse:
+        if configured.ai_quota.enabled and not context.get("device", {}).get("mac_address"):
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "device_mac_required_for_ai_quota",
+                    "message": "a paired device MAC is required before starting an AI task",
+                },
+            )
         caller_id = http_request.state.client_key_id or f"context:{context['context_id']}"
         quota = storage.reserve_ai_task(
             caller_id,

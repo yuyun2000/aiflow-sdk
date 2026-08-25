@@ -330,6 +330,7 @@ def test_task_manager_strips_private_payload_before_public_persistence(tmp_path)
         None,
         None,
         None,
+        quota_client=object(),
     )
 
     asyncio.run(
@@ -432,6 +433,7 @@ def test_coding_completion_uploads_references_instead_of_duplicate_result(tmp_pa
         None,
         None,
         None,
+        quota_client=object(),
     )
     public_result = {
         "agent": {"usage": {"output_tokens": 10}},
