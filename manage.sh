@@ -309,6 +309,13 @@ print(f"Context window limit: {settings.claude_context_window_tokens} tokens")
 print(f"Agent max turns: {settings.claude_max_turns}")
 print(f"Provider URL: {base_url}")
 print(f"Authentication: {', '.join(auth_sources) if auth_sources else 'not configured'}")
+quota = settings.ai_quota
+print(
+    "AI free-token quota: "
+    f"{'enabled' if quota.enabled else 'disabled'} "
+    f"(credentials={'configured' if quota.configured else 'missing'}, "
+    f"model={quota.model}, requested_tokens={quota.requested_tokens or 'server-default'})"
+)
 print("Public entrypoint: anonymous web BFF (aiflow_server.gateway)")
 print("Private core authentication: enabled with an in-memory BFF key")
 print("Browser-held signing secret: none")

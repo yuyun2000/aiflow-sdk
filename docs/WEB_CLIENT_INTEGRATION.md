@@ -38,6 +38,7 @@ function authHeaders(deviceId, json = true) {
 async function connectDevice(pairedDevice) {
   if (!pairedDevice.deviceId) throw new Error("paired deviceId is required");
   if (!pairedDevice.clientId) throw new Error("clientId is required");
+  if (!pairedDevice.mac) throw new Error("device MAC is required for AI quota authorization");
   const response = await fetch(`${API_BASE}/api/v3/contexts`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -64,6 +65,7 @@ async function connectDevice(pairedDevice) {
 - 相同 `deviceId` 重连返回 `200`、`created=false`，复用原工作区和 Claude 历史，并以本次传入值更新 `clientId`/MAC；旧客户端省略 MAC 时保留已有值。MAC 输入也可使用 `mac` 或 `macAddress` 别名。
 - 重连会轮换令牌，旧标签页令牌立即失效；始终用响应中的新令牌覆盖缓存。
 - 响应自带 `system_status`，前端可立即展示当前会话和队列容量。
+- `GET /api/v3/capabilities -> ai_quota.enabled=true` 时，Coding 必须使用配对得到的真实 MAC；缺失会返回 `422 device_mac_required_for_ai_quota`。MAC 不参与前端额度签名，浏览器也不能读取服务端共享密钥。
 
 新设备达到总会话容量会返回 `503 session_capacity_full`，已有设备不受影响，仍可重连。
 
@@ -175,7 +177,7 @@ async function startCoding(deviceId, { text = "", images = [], audio = [], deplo
 - “生成并运行”：`deploy_mode=server`。
 - 只有明确需要 Agent 自行控制部署步骤时使用 `agent`。
 
-任务返回 `202` 后立即进入任务界面。`queue_position` 不为空时展示“排队第 N 位”，不要让 HTTP 请求等待 Agent 完成。
+任务返回 `202` 后立即进入任务界面。`queue_position` 不为空时展示“排队第 N 位”，不要让 HTTP 请求等待 Agent 完成。额度授权在任务获得执行槽后发生：只有 `ai_quota_authorized` 到达后才会启动模型；额度不足最终表现为 `task_failed`，其中 `error.code=ai_quota_denied`、`quota_reason` 区分每日额度、终身额度、设备停用等原因。客户端不得通过自动重复提交绕过额度结果。
 
 ## 6. SSE 与恢复
 
@@ -185,7 +187,9 @@ function watchTask(task, handlers) {
   url.searchParams.set("stream_token", task.stream_token);
   const source = new EventSource(url);
   const types = [
-    "task_queued", "task_started", "agent_connected", "agent_system",
+    "task_queued", "task_started", "ai_quota_authorized", "ai_quota_settled",
+    "ai_quota_settlement_pending",
+    "ai_quota_released", "ai_quota_release_failed", "agent_connected", "agent_system",
     "agent_status", "agent_warning", "agent_reasoning", "agent_partial_capture",
     "agent_stream_event",
     "agent_sdk_event", "agent_user_message", "agent_user_content",
@@ -229,6 +233,8 @@ async function getTask(deviceId, taskId) {
 ```
 
 状态中的 `queue_position`、`stage`、`possibly_stalled` 是权威生命周期信息。`progress` 是兼容字段，只会在排队/运行时为 `0`、终态为 `100`；它不是模型完成百分比，客户端不得显示成 20%、50% 等进度，也不得据此推测模型正在做什么。`possibly_stalled=true` 时展示警告和取消按钮，不要自动重复请求。
+
+额度事件不包含内部 `requestId`、`authorizationId`、MAC 或签名。`ai_quota_settled` 的 `input_tokens`、`output_tokens`、`cache_creation_input_tokens`、`cache_read_input_tokens` 来自服务端收到的可信 SDK usage；其中 `input_tokens` 已包含两项缓存 Token，`actual_tokens=input_tokens+output_tokens`，前端不能重复加入缓存明细。前端只展示这些数字，不能上报或覆盖。`ai_quota_settlement_pending` 表示任务虽已失败或取消，但模型可能已经产生费用，服务端保留预占等待补偿；客户端不得据此自动重试任务。`direct-run` 不产生模型费用，因此不会出现这些额度事件。
 
 ## 7. deviceId 项目与历史恢复
 

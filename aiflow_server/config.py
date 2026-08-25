@@ -109,12 +109,12 @@ def _load_client_keys(path: Path) -> tuple[tuple[str, bytes], ...]:
     return tuple(keys)
 
 
-def _normalize_base_url(value: str) -> str:
+def _normalize_base_url(value: str, name: str = "device_push.base_url") -> str:
     parts = urlsplit(value.strip())
     if parts.scheme not in {"http", "https"} or not parts.netloc:
-        raise ConfigError("device_push.base_url must be an absolute HTTP(S) URL")
+        raise ConfigError(f"{name} must be an absolute HTTP(S) URL")
     if parts.username or parts.password or parts.query or parts.fragment:
-        raise ConfigError("device_push.base_url must not include credentials, query, or fragment")
+        raise ConfigError(f"{name} must not include credentials, query, or fragment")
     return value.rstrip("/")
 
 
@@ -137,6 +137,27 @@ class TlsLoggingSettings:
     retry_base_seconds: float
     retry_max_seconds: float
     max_payload_bytes: int
+
+
+@dataclass(frozen=True)
+class AiQuotaSettings:
+    enabled: bool
+    base_url: str
+    client_id: str
+    hmac_secret: str
+    model: str
+    requested_tokens: int | None
+    timeout_seconds: float
+    max_attempts: int
+
+    @property
+    def configured(self) -> bool:
+        return bool(
+            self.base_url
+            and self.client_id
+            and self.model
+            and len(self.hmac_secret.encode("utf-8")) >= 32
+        )
 
 
 @dataclass(frozen=True)
@@ -191,6 +212,7 @@ class Settings:
     web_ai_tasks_per_session_minute: int
     web_ai_tasks_per_session_day: int
     web_ai_tasks_per_ip_day: int
+    ai_quota: AiQuotaSettings
     tls_logging: TlsLoggingSettings
     asr: AsrSettings
 
@@ -204,7 +226,7 @@ class Settings:
 
     def public_dict(self, available_skills: list[str]) -> dict[str, Any]:
         return {
-            "api_version": "3.4",
+            "api_version": "3.5",
             "agent": "claude-code",
             "model": self.claude_model or "claude-code-default",
             "fallback_model": self.claude_fallback_model,
@@ -238,6 +260,12 @@ class Settings:
                 "max_ai_tasks_per_client_minute": self.max_ai_tasks_per_client_minute,
                 "max_ai_tasks_per_client_day": self.max_ai_tasks_per_client_day,
                 "max_ai_tasks_global_day": self.max_ai_tasks_global_day,
+            },
+            "ai_quota": {
+                "enabled": self.ai_quota.enabled,
+                "configured": self.ai_quota.configured,
+                "model": self.ai_quota.model,
+                "requested_tokens": self.ai_quota.requested_tokens,
             },
             "web_gateway": {
                 "anonymous": True,
@@ -305,6 +333,35 @@ def load_settings(path: str | Path | None = None) -> Settings:
     client_auth_keys = _load_client_keys(client_auth_keys_file) if client_auth_keys_file else ()
     if client_auth_enabled and not client_auth_keys:
         raise ConfigError("client_auth is enabled but no client keys file is configured")
+
+    raw_ai_quota = data.get("ai_quota", {})
+    if not isinstance(raw_ai_quota, dict):
+        raise ConfigError("config section 'ai_quota' must be an object")
+    if any(name in raw_ai_quota for name in ("secret", "hmac_secret", "hmacSecret")):
+        raise ConfigError("AI quota HMAC secret must be configured only through AIFLOW_AI_QUOTA_HMAC_SECRET")
+    ai_quota_enabled = _boolean(
+        os.environ.get("AIFLOW_AI_QUOTA_ENABLED")
+        or _nested(data, "ai_quota", "enabled", True),
+        "ai_quota.enabled",
+    )
+    raw_requested_tokens = (
+        os.environ.get("AIFLOW_AI_QUOTA_REQUESTED_TOKENS")
+        or _nested(data, "ai_quota", "requested_tokens", 500000)
+    )
+    ai_quota_requested_tokens = (
+        None
+        if raw_requested_tokens in (None, "")
+        else _positive_int(raw_requested_tokens, "ai_quota.requested_tokens")
+    )
+    if ai_quota_requested_tokens is not None and ai_quota_requested_tokens > 500000:
+        raise ConfigError("ai_quota.requested_tokens must not exceed 500000")
+    ai_quota_timeout = _non_negative_float(
+        os.environ.get("AIFLOW_AI_QUOTA_TIMEOUT_SECONDS")
+        or _nested(data, "ai_quota", "timeout_seconds", 5),
+        "ai_quota.timeout_seconds",
+    )
+    if ai_quota_timeout <= 0:
+        raise ConfigError("ai_quota.timeout_seconds must be greater than zero")
 
     tls_enabled = _boolean(
         os.environ.get("TLS_LOG_ENABLED")
@@ -411,7 +468,8 @@ def load_settings(path: str | Path | None = None) -> Settings:
         m5stack_mcp_enabled=bool(_nested(data, "mcp", "m5stack_enabled", True)),
         m5stack_mcp_url=str(_nested(data, "mcp", "m5stack_url", "https://mcp.m5stack.com/sse")),
         device_push_base_url=_normalize_base_url(
-            str(_nested(data, "device_push", "base_url", "https://uiflow2.m5stack.com/m5stack/"))
+            str(_nested(data, "device_push", "base_url", "https://uiflow2.m5stack.com/m5stack/")),
+            "device_push.base_url",
         ),
         device_push_timeout=float(_nested(data, "device_push", "timeout_seconds", 120)),
         max_sessions=_positive_int(
@@ -496,6 +554,37 @@ def load_settings(path: str | Path | None = None) -> Settings:
         web_ai_tasks_per_ip_day=_positive_int(
             _nested(data, "web_gateway", "max_ai_tasks_per_ip_day", 100),
             "web_gateway.max_ai_tasks_per_ip_day",
+        ),
+        ai_quota=AiQuotaSettings(
+            enabled=ai_quota_enabled,
+            base_url=_normalize_base_url(
+                str(
+                    os.environ.get("AIFLOW_AI_QUOTA_BASE_URL")
+                    or _nested(
+                        data,
+                        "ai_quota",
+                        "base_url",
+                        "https://uiflow2.m5stack.com/m5stack/internal/v1/aiQuota",
+                    )
+                ),
+                "ai_quota.base_url",
+            ),
+            client_id=str(
+                os.environ.get("AIFLOW_AI_QUOTA_CLIENT_ID")
+                or _nested(data, "ai_quota", "client_id", "uiflow-aiflow-prod")
+            ).strip(),
+            hmac_secret=os.environ.get("AIFLOW_AI_QUOTA_HMAC_SECRET", "").strip(),
+            model=str(
+                os.environ.get("AIFLOW_AI_QUOTA_MODEL")
+                or _nested(data, "ai_quota", "model", "deepseek-pro")
+            ).strip(),
+            requested_tokens=ai_quota_requested_tokens,
+            timeout_seconds=ai_quota_timeout,
+            max_attempts=_positive_int(
+                os.environ.get("AIFLOW_AI_QUOTA_MAX_ATTEMPTS")
+                or _nested(data, "ai_quota", "max_attempts", 2),
+                "ai_quota.max_attempts",
+            ),
         ),
         tls_logging=TlsLoggingSettings(
             enabled=tls_enabled,

@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any
 
 from .agent import AgentCancelled, AgentError, ClaudeRunner
+from .ai_quota import AiQuotaAuthorization, AiQuotaClient, AiQuotaDenied, AiQuotaError, AiQuotaNotFound
 from .config import Settings
 from .device_push import DeploymentError, DevicePusher
 from .storage import TERMINAL_STATUSES, Storage, new_token, utc_now
@@ -15,7 +17,9 @@ from .workspaces import WorkspaceManager
 
 
 AGENT_ACTIVITY_WRITE_INTERVAL_SECONDS = 1.0
+AUTHORIZATION_EXPIRY_SAFETY_SECONDS = 5.0
 TERMINAL_EVENT_TYPES = {"task_completed", "task_failed", "task_cancelled"}
+LOGGER = logging.getLogger(__name__)
 
 
 class TaskConflict(RuntimeError):
@@ -48,12 +52,14 @@ class TaskManager:
         runner: ClaudeRunner,
         pusher: DevicePusher,
         telemetry: TlsTelemetry | None = None,
+        quota_client: AiQuotaClient | None = None,
     ):
         self.settings = settings
         self.storage = storage
         self.workspaces = workspaces
         self.runner = runner
         self.pusher = pusher
+        self.quota_client = quota_client or AiQuotaClient(settings.ai_quota)
         self.telemetry = telemetry
         self._jobs: dict[str, asyncio.Task[None]] = {}
         self._cancel_events: dict[str, asyncio.Event] = {}
@@ -61,6 +67,120 @@ class TaskManager:
         self._last_agent_activity_write_at: dict[str, float] = {}
         self._start_lock = asyncio.Lock()
         self._execution_slots = asyncio.Semaphore(settings.max_concurrent_tasks)
+        self._quota_reconcile_job: asyncio.Task[None] | None = None
+
+    async def startup(self) -> None:
+        if self.settings.ai_quota.enabled and self.settings.ai_quota.configured:
+            self._quota_reconcile_job = asyncio.create_task(
+                self._reconcile_ai_quota_reservations(),
+                name="aiflow-ai-quota-reconcile",
+            )
+
+    async def _reconcile_ai_quota_reservations(self) -> None:
+        rows = await asyncio.to_thread(self.storage.list_open_ai_quota_reservations)
+        for row in rows:
+            try:
+                local_status = str(row.get("status") or "UNKNOWN")
+                authorization_id = row.get("authorization_id")
+                granted_tokens = row.get("granted_tokens")
+                expires_at = row.get("expires_at")
+                if not authorization_id:
+                    try:
+                        state = await self.quota_client.status(row["request_id"])
+                    except AiQuotaNotFound:
+                        await asyncio.to_thread(
+                            self.storage.update_ai_quota_status,
+                            row["task_id"],
+                            "NOT_FOUND",
+                        )
+                        continue
+                    remote_status = state.get("status")
+                    if remote_status != "RESERVED":
+                        await asyncio.to_thread(
+                            self.storage.update_ai_quota_status,
+                            row["task_id"],
+                            str(remote_status or "UNKNOWN"),
+                        )
+                        continue
+                    authorization_id = state.get("authorizationId")
+                    granted_tokens = state.get("reservedTokens")
+                    expires_at = state.get("expiresAt")
+                if not isinstance(authorization_id, str) or not isinstance(granted_tokens, int):
+                    continue
+                authorization = AiQuotaAuthorization(
+                    request_id=row["request_id"],
+                    authorization_id=authorization_id,
+                    granted_tokens=granted_tokens,
+                    expires_at=expires_at if isinstance(expires_at, str) else None,
+                    quota={},
+                )
+                if local_status == "USAGE_UNKNOWN":
+                    state = await self.quota_client.status(row["request_id"])
+                    remote_status = str(state.get("status") or "UNKNOWN")
+                    if remote_status != "RESERVED":
+                        await asyncio.to_thread(
+                            self.storage.update_ai_quota_status,
+                            row["task_id"],
+                            remote_status,
+                        )
+                    else:
+                        LOGGER.error(
+                            "AI quota usage remains unknown for task %s; reservation was not released",
+                            row["task_id"],
+                        )
+                    continue
+                if local_status in {"SETTLEMENT_REQUIRED", "SETTLING"}:
+                    input_tokens = row.get("input_tokens")
+                    output_tokens = row.get("output_tokens")
+                    cache_creation_input_tokens = row.get("cache_creation_input_tokens")
+                    cache_read_input_tokens = row.get("cache_read_input_tokens")
+                    if not all(
+                        isinstance(value, int) and not isinstance(value, bool) and value >= 0
+                        for value in (
+                            input_tokens,
+                            output_tokens,
+                            cache_creation_input_tokens,
+                            cache_read_input_tokens,
+                        )
+                    ):
+                        LOGGER.error(
+                            "Cannot reconcile AI quota settlement for task %s without trusted usage",
+                            row["task_id"],
+                        )
+                        continue
+                    await self.quota_client.settle(
+                        authorization,
+                        input_tokens,
+                        output_tokens,
+                        cache_creation_input_tokens,
+                        cache_read_input_tokens,
+                    )
+                    await asyncio.to_thread(
+                        self.storage.update_ai_quota_status,
+                        row["task_id"],
+                        "SETTLED",
+                        input_tokens=input_tokens,
+                        output_tokens=output_tokens,
+                        cache_creation_input_tokens=cache_creation_input_tokens,
+                        cache_read_input_tokens=cache_read_input_tokens,
+                    )
+                    continue
+                result = await self.quota_client.release(authorization, "AIFLOW_REQUEST_FAILED")
+                status = str(result.get("status") or "RELEASED")
+                await asyncio.to_thread(
+                    self.storage.update_ai_quota_status,
+                    row["task_id"],
+                    status,
+                    authorization_id=authorization.authorization_id,
+                    granted_tokens=authorization.granted_tokens,
+                    expires_at=authorization.expires_at,
+                )
+            except Exception as exc:
+                LOGGER.warning(
+                    "Failed to reconcile AI quota reservation for task %s: error_type=%s",
+                    row["task_id"],
+                    type(exc).__name__,
+                )
 
     def subscribe_events(self, task_id: str) -> asyncio.Event:
         signal = asyncio.Event()
@@ -246,12 +366,18 @@ class TaskManager:
 
     async def _run_coding(self, task_id: str, context: dict[str, Any], request: dict[str, Any], cancel_event: asyncio.Event) -> None:
         heartbeat = asyncio.create_task(self._heartbeat(task_id, cancel_event))
+        authorization: AiQuotaAuthorization | None = None
+        model_completed = False
+        model_request_started = False
+        trusted_usage: tuple[int, int, int, int] | None = None
+        quota_finalized = False
         try:
             now = utc_now()
+            initial_stage = "authorizing_ai_quota" if self.settings.ai_quota.enabled else "preparing_workspace"
             self.storage.update_task(
                 task_id,
                 status="running",
-                stage="preparing_workspace",
+                stage=initial_stage,
                 started_at=now,
                 last_agent_event_at=now,
             )
@@ -261,14 +387,54 @@ class TaskManager:
                 "task_started",
                 {
                     "status": "running",
-                    "stage": "preparing_workspace",
-                    "message": "Preparing isolated workspace",
+                    "stage": initial_stage,
+                    "message": (
+                        "Checking device AI token quota"
+                        if self.settings.ai_quota.enabled
+                        else "Preparing isolated workspace"
+                    ),
                     TLS_EVENT_DATA_KEY: {
                         "status": "running",
-                        "stage": "preparing_workspace",
+                        "stage": initial_stage,
                     },
                 },
             )
+            if self.settings.ai_quota.enabled:
+                mac = str(context.get("device", {}).get("mac_address") or "").strip()
+                if not mac:
+                    raise AiQuotaError(
+                        "device_mac_required_for_ai_quota",
+                        "A paired device MAC is required before an AI request can be authorized",
+                        retryable=False,
+                    )
+                await asyncio.to_thread(
+                    self.storage.begin_ai_quota_request,
+                    task_id,
+                    task_id,
+                    self.settings.ai_quota.model,
+                )
+                authorization = await self.quota_client.authorize(task_id, mac)
+                await asyncio.to_thread(
+                    self.storage.authorize_ai_quota,
+                    task_id,
+                    authorization.authorization_id,
+                    authorization.granted_tokens,
+                    authorization.expires_at,
+                )
+                await self._emit(
+                    task_id,
+                    "ai_quota_authorized",
+                    {
+                        "stage": "preparing_workspace",
+                        "message": "AI token quota authorized",
+                        "granted_tokens": authorization.granted_tokens,
+                        "expires_at": authorization.expires_at,
+                        "quota": authorization.quota,
+                    },
+                )
+                self.storage.update_task(task_id, stage="preparing_workspace")
+                if cancel_event.is_set():
+                    raise AgentCancelled()
             self.workspaces.initialize(context["context_id"], context["device"])
             if cancel_event.is_set():
                 raise AgentCancelled()
@@ -276,6 +442,30 @@ class TaskManager:
             self.storage.update_task(task_id, stage="coding")
 
             async def emit(event_type: str, data: dict[str, Any]) -> None:
+                nonlocal model_request_started, trusted_usage
+                if event_type == "model_request_started":
+                    model_request_started = True
+                    if authorization is not None:
+                        await asyncio.to_thread(
+                            self.storage.update_ai_quota_status,
+                            task_id,
+                            "USAGE_UNKNOWN",
+                        )
+                    return
+                if authorization is not None and event_type == "assistant_message_started":
+                    usage = data.get("usage")
+                    if isinstance(usage, dict):
+                        try:
+                            current_usage = self._trusted_usage_tokens(usage)
+                        except AiQuotaError:
+                            pass
+                        else:
+                            trusted_usage = self._add_usage(trusted_usage, current_usage)
+                            await self._persist_ai_quota_usage(
+                                task_id,
+                                "SETTLEMENT_REQUIRED",
+                                trusted_usage,
+                            )
                 await self._emit(task_id, event_type, data, agent_event=True)
 
             runner_context = {
@@ -283,7 +473,18 @@ class TaskManager:
                 "workspace": str(self.workspaces.workspace_for(context["context_id"])),
                 "message_attachments": request.get("attachments", []),
             }
-            result = await self.runner.run(
+            timeout_seconds = (
+                self._authorization_timeout_seconds(authorization)
+                if authorization is not None
+                else None
+            )
+            if timeout_seconds is not None and timeout_seconds <= 0:
+                raise AiQuotaError(
+                    "ai_quota_authorization_expired",
+                    "AI quota authorization expired before the model request could start",
+                    retryable=False,
+                )
+            runner_call = self.runner.run(
                 task_id,
                 runner_context,
                 request["prompt"],
@@ -291,6 +492,39 @@ class TaskManager:
                 emit,
                 cancel_event,
             )
+            if timeout_seconds is not None:
+                try:
+                    result = await asyncio.wait_for(runner_call, timeout=timeout_seconds)
+                except asyncio.TimeoutError as exc:
+                    await self.runner.cancel(task_id)
+                    raise AiQuotaError(
+                        "ai_quota_authorization_expired",
+                        "AI quota authorization expired before the Agent finished",
+                        retryable=False,
+                    ) from exc
+            else:
+                result = await runner_call
+            model_completed = True
+            if authorization is not None:
+                try:
+                    trusted_usage = self._trusted_usage_tokens(result.usage)
+                except AiQuotaError:
+                    if trusted_usage is None:
+                        await asyncio.to_thread(
+                            self.storage.update_ai_quota_status,
+                            task_id,
+                            "USAGE_UNKNOWN",
+                        )
+                        raise
+                await self._settle_ai_quota(
+                    task_id,
+                    authorization,
+                    trusted_usage,
+                    stage="collecting_files",
+                )
+                quota_finalized = True
+            if cancel_event.is_set():
+                raise AgentCancelled()
             self.storage.set_session_id(context["context_id"], result.session_id)
             self.storage.update_task(task_id, session_id=result.session_id, stage="collecting_files")
             workspace = self.workspaces.workspace_for(context["context_id"])
@@ -351,13 +585,62 @@ class TaskManager:
                 },
             )
         except AgentCancelled:
+            if authorization is not None and not model_completed and not quota_finalized:
+                await self._finalize_interrupted_ai_quota(
+                    task_id,
+                    authorization,
+                    trusted_usage,
+                    model_request_started,
+                    "CLIENT_CANCELLED",
+                )
             self._finish_cancelled(task_id)
+        except AiQuotaDenied as exc:
+            await asyncio.to_thread(self.storage.update_ai_quota_status, task_id, "DENIED")
+            self._finish_failed(
+                task_id,
+                exc.code,
+                str(exc),
+                exc.retryable,
+                {"quota_reason": exc.reason, "quota": exc.quota},
+            )
+        except AiQuotaError as exc:
+            if authorization is not None and not model_completed and not quota_finalized:
+                await self._finalize_interrupted_ai_quota(
+                    task_id,
+                    authorization,
+                    trusted_usage,
+                    model_request_started,
+                    "AIFLOW_REQUEST_FAILED",
+                )
+            self._finish_failed(
+                task_id,
+                exc.code,
+                str(exc),
+                exc.retryable,
+                {"quota_error_code": exc.service_error_code} if exc.service_error_code else None,
+            )
         except (AgentError, DeploymentError) as exc:
+            if authorization is not None and not model_completed and not quota_finalized:
+                await self._finalize_interrupted_ai_quota(
+                    task_id,
+                    authorization,
+                    trusted_usage,
+                    model_request_started,
+                    "DEEPSEEK_REQUEST_FAILED" if isinstance(exc, AgentError) else "AIFLOW_REQUEST_FAILED",
+                )
             if cancel_event.is_set():
                 self._finish_cancelled(task_id)
             else:
                 self._finish_failed(task_id, exc.code, str(exc), exc.retryable)
         except Exception as exc:
+            if authorization is not None and not model_completed and not quota_finalized:
+                await self._finalize_interrupted_ai_quota(
+                    task_id,
+                    authorization,
+                    trusted_usage,
+                    model_request_started,
+                    "AIFLOW_REQUEST_FAILED",
+                )
             if cancel_event.is_set():
                 self._finish_cancelled(task_id)
             else:
@@ -367,6 +650,242 @@ class TaskManager:
             heartbeat.cancel()
             await asyncio.gather(heartbeat, return_exceptions=True)
             self._cancel_events.pop(task_id, None)
+
+    @staticmethod
+    def _authorization_timeout_seconds(authorization: AiQuotaAuthorization) -> float:
+        if not authorization.expires_at:
+            raise AiQuotaError(
+                "ai_quota_invalid_response",
+                "AI quota authorization did not include an expiry time",
+                retryable=False,
+            )
+        try:
+            expires_at = datetime.fromisoformat(authorization.expires_at.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise AiQuotaError(
+                "ai_quota_invalid_response",
+                "AI quota authorization included an invalid expiry time",
+                retryable=False,
+            ) from exc
+        if expires_at.tzinfo is None:
+            raise AiQuotaError(
+                "ai_quota_invalid_response",
+                "AI quota authorization expiry time must include a timezone",
+                retryable=False,
+            )
+        return (
+            expires_at.astimezone(timezone.utc) - datetime.now(timezone.utc)
+        ).total_seconds() - AUTHORIZATION_EXPIRY_SAFETY_SECONDS
+
+    @staticmethod
+    def _trusted_usage_tokens(usage: dict[str, Any]) -> tuple[int, int, int, int]:
+        def token_value(*names: str) -> int:
+            for name in names:
+                value = usage.get(name)
+                if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                    return value
+            raise AiQuotaError(
+                "ai_quota_usage_missing",
+                "Trusted model token usage was unavailable, so AI quota settlement could not be completed",
+                retryable=False,
+            )
+
+        def optional_token_value(*names: str) -> int:
+            for name in names:
+                if name in usage:
+                    value = usage[name]
+                    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                        return value
+                    raise AiQuotaError(
+                        "ai_quota_usage_missing",
+                        "Trusted model token usage contained an invalid cache token count",
+                        retryable=False,
+                    )
+            return 0
+
+        sdk_input_tokens = token_value("input_tokens", "inputTokens")
+        output_tokens = token_value("output_tokens", "outputTokens")
+        cache_creation_input_tokens = optional_token_value(
+            "cache_creation_input_tokens",
+            "cacheCreationInputTokens",
+        )
+        cache_read_input_tokens = optional_token_value(
+            "cache_read_input_tokens",
+            "cacheReadInputTokens",
+        )
+        input_tokens = (
+            sdk_input_tokens
+            + cache_creation_input_tokens
+            + cache_read_input_tokens
+        )
+        return (
+            input_tokens,
+            output_tokens,
+            cache_creation_input_tokens,
+            cache_read_input_tokens,
+        )
+
+    @staticmethod
+    def _add_usage(
+        accumulated: tuple[int, int, int, int] | None,
+        current: tuple[int, int, int, int],
+    ) -> tuple[int, int, int, int]:
+        if accumulated is None:
+            return current
+        return tuple(left + right for left, right in zip(accumulated, current, strict=True))
+
+    async def _persist_ai_quota_usage(
+        self,
+        task_id: str,
+        status: str,
+        usage: tuple[int, int, int, int],
+    ) -> None:
+        input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens = usage
+        await asyncio.to_thread(
+            self.storage.update_ai_quota_status,
+            task_id,
+            status,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cache_creation_input_tokens=cache_creation_input_tokens,
+            cache_read_input_tokens=cache_read_input_tokens,
+        )
+
+    async def _settle_ai_quota(
+        self,
+        task_id: str,
+        authorization: AiQuotaAuthorization,
+        usage: tuple[int, int, int, int],
+        *,
+        stage: str,
+    ) -> None:
+        input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens = usage
+        await self._persist_ai_quota_usage(task_id, "SETTLING", usage)
+        settlement = await self.quota_client.settle(
+            authorization,
+            input_tokens,
+            output_tokens,
+            cache_creation_input_tokens,
+            cache_read_input_tokens,
+        )
+        await self._persist_ai_quota_usage(task_id, "SETTLED", usage)
+        await self._emit(
+            task_id,
+            "ai_quota_settled",
+            self._public_settlement(settlement, usage, stage=stage),
+        )
+
+    @staticmethod
+    def _public_settlement(
+        settlement: dict[str, Any],
+        usage: tuple[int, int, int, int],
+        *,
+        stage: str,
+    ) -> dict[str, Any]:
+        input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens = usage
+        public = {
+            "stage": stage,
+            "message": "AI token usage settled",
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cache_creation_input_tokens": cache_creation_input_tokens,
+            "cache_read_input_tokens": cache_read_input_tokens,
+            "actual_tokens": settlement.get("actualTokens", input_tokens + output_tokens),
+            "released_tokens": settlement.get("releasedTokens"),
+            "confirmed_by_status": bool(settlement.get("confirmedByStatus")),
+        }
+        for source, target in (
+            ("dailyFreeAvailableTokens", "daily_free_available_tokens"),
+            ("lifetimeFreeAvailableTokens", "lifetime_free_available_tokens"),
+            ("effectiveFreeAvailableTokens", "effective_free_available_tokens"),
+            ("paidAvailableTokens", "paid_available_tokens"),
+        ):
+            if isinstance(settlement.get(source), int):
+                public[target] = settlement[source]
+        return public
+
+    async def _finalize_interrupted_ai_quota(
+        self,
+        task_id: str,
+        authorization: AiQuotaAuthorization,
+        usage: tuple[int, int, int, int] | None,
+        model_request_started: bool,
+        release_reason: str,
+    ) -> None:
+        if usage is not None:
+            try:
+                await self._settle_ai_quota(
+                    task_id,
+                    authorization,
+                    usage,
+                    stage="finalizing",
+                )
+            except AiQuotaError as exc:
+                await self._emit(
+                    task_id,
+                    "ai_quota_settlement_pending",
+                    {
+                        "stage": "finalizing",
+                        "message": "AI token usage was saved but settlement could not be confirmed",
+                        "reason": "settlement_unconfirmed",
+                        "retryable": exc.retryable,
+                    },
+                )
+            return
+        if model_request_started:
+            await asyncio.to_thread(
+                self.storage.update_ai_quota_status,
+                task_id,
+                "USAGE_UNKNOWN",
+            )
+            await self._emit(
+                task_id,
+                "ai_quota_settlement_pending",
+                {
+                    "stage": "finalizing",
+                    "message": "Model usage could not be confirmed; quota reservation was not released",
+                    "reason": "usage_unknown",
+                    "retryable": False,
+                },
+            )
+            return
+        await self._release_ai_quota(task_id, authorization, release_reason)
+
+    async def _release_ai_quota(
+        self,
+        task_id: str,
+        authorization: AiQuotaAuthorization,
+        reason: str,
+    ) -> bool:
+        try:
+            result = await self.quota_client.release(authorization, reason)
+        except AiQuotaError as exc:
+            await self._emit(
+                task_id,
+                "ai_quota_release_failed",
+                {
+                    "message": "AI token quota release could not be confirmed",
+                    "retryable": exc.retryable,
+                },
+            )
+            return False
+        remote_status = str(result.get("status") or "RELEASED")
+        await asyncio.to_thread(
+            self.storage.update_ai_quota_status,
+            task_id,
+            remote_status,
+        )
+        await self._emit(
+            task_id,
+            "ai_quota_released",
+            {
+                "message": "AI token quota reservation released",
+                "reason": reason,
+                "status": remote_status,
+                "confirmed_by_status": bool(result.get("confirmedByStatus")),
+            },
+        )
+        return True
 
     async def _run_direct_deploy(self, task_id: str, context: dict[str, Any], request: dict[str, Any], cancel_event: asyncio.Event) -> None:
         heartbeat = asyncio.create_task(self._heartbeat(task_id, cancel_event))
@@ -443,8 +962,17 @@ class TaskManager:
         )
         self._append_event(task_id, "task_cancelled", {"status": "cancelled", "stage": "cancelled", "progress": 100})
 
-    def _finish_failed(self, task_id: str, code: str, message: str, retryable: bool) -> None:
+    def _finish_failed(
+        self,
+        task_id: str,
+        code: str,
+        message: str,
+        retryable: bool,
+        details: dict[str, Any] | None = None,
+    ) -> None:
         error = {"code": code, "message": message, "retryable": retryable}
+        if details:
+            error.update(details)
         self.storage.update_task(
             task_id,
             status="failed",
@@ -565,3 +1093,6 @@ class TaskManager:
         jobs = list(self._jobs.values())
         if jobs:
             await asyncio.gather(*jobs, return_exceptions=True)
+        if self._quota_reconcile_job is not None:
+            await asyncio.gather(self._quota_reconcile_job, return_exceptions=True)
+        await self.quota_client.close()

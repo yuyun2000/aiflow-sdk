@@ -3,9 +3,9 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
-import json
 import time
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -13,6 +13,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from aiflow_server.agent import AgentCancelled, AgentRunResult
+from aiflow_server.ai_quota import AiQuotaAuthorization, AiQuotaDenied, AiQuotaError
 from aiflow_server.app import TOKEN_HEADER, create_app
 from aiflow_server.config import load_settings
 
@@ -36,6 +37,12 @@ class FakeRunner:
         )
         self.active += 1
         self.max_active = max(self.max_active, self.active)
+        if prompt == "slow-before-model":
+            while not cancel_event.is_set():
+                await asyncio.sleep(0.01)
+            self.active -= 1
+            raise AgentCancelled()
+        await emit("model_request_started", {"stage": "coding"})
         await emit("tool_started", {"stage": "writing_files", "progress": 60, "message": "Writing main.py"})
         await emit("agent_status", {"stage": "agent_starting", "progress": 20, "message": "late SDK status"})
         if prompt == "thinking":
@@ -60,6 +67,21 @@ class FakeRunner:
         workspace = Path(context["workspace"])
         workspace.joinpath("main.py").write_text("print('isolated')\n", encoding="utf-8")
         try:
+            if prompt == "slow-with-usage":
+                await emit(
+                    "assistant_message_started",
+                    {
+                        "usage": {
+                            "input_tokens": 7,
+                            "output_tokens": 4,
+                            "cache_creation_input_tokens": 2,
+                            "cache_read_input_tokens": 3,
+                        }
+                    },
+                )
+                while not cancel_event.is_set():
+                    await asyncio.sleep(0.01)
+                raise AgentCancelled()
             if prompt == "slow":
                 while not cancel_event.is_set():
                     await asyncio.sleep(0.01)
@@ -67,7 +89,12 @@ class FakeRunner:
             await asyncio.sleep(0.3 if prompt == "delay" else 0.02)
             return AgentRunResult(
                 session_id="00000000-0000-4000-8000-000000000001",
-                usage={"input_tokens": 10, "output_tokens": 5},
+                usage={
+                    "input_tokens": 10,
+                    "output_tokens": 5,
+                    "cache_creation_input_tokens": 2,
+                    "cache_read_input_tokens": 3,
+                },
                 total_cost_usd=0.001,
                 duration_ms=20,
                 num_turns=1,
@@ -102,6 +129,79 @@ class FakePusher:
         return {"ok": True, "action": "direct_deploy", "steps": [{"chunkCount": 1}]}
 
 
+class FakeQuotaClient:
+    def __init__(
+        self,
+        deny_reason: str | None = None,
+        settle_error: AiQuotaError | None = None,
+    ):
+        self.deny_reason = deny_reason
+        self.settle_error = settle_error
+        self.runner = None
+        self.authorize_calls = []
+        self.settle_calls = []
+        self.release_calls = []
+        self.closed = False
+
+    async def authorize(self, request_id, mac):
+        if self.runner is not None:
+            assert self.runner.calls == []
+        self.authorize_calls.append((request_id, mac))
+        if self.deny_reason:
+            raise AiQuotaDenied(
+                self.deny_reason,
+                {"effectiveFreeAvailableTokens": 0},
+            )
+        return AiQuotaAuthorization(
+            request_id=request_id,
+            authorization_id="qa_fake_authorization",
+            granted_tokens=500000,
+            expires_at=(datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat(),
+            quota={"effectiveFreeAvailableTokens": 1500000},
+        )
+
+    async def settle(
+        self,
+        authorization,
+        input_tokens,
+        output_tokens,
+        cache_creation_input_tokens,
+        cache_read_input_tokens,
+    ):
+        assert self.runner is None or self.runner.calls
+        self.settle_calls.append(
+            (
+                authorization.request_id,
+                input_tokens,
+                output_tokens,
+                cache_creation_input_tokens,
+                cache_read_input_tokens,
+            )
+        )
+        if self.settle_error:
+            raise self.settle_error
+        return {
+            "settled": True,
+            "actualTokens": input_tokens + output_tokens,
+            "inputTokens": input_tokens,
+            "outputTokens": output_tokens,
+            "cacheCreationInputTokens": cache_creation_input_tokens,
+            "cacheReadInputTokens": cache_read_input_tokens,
+            "releasedTokens": authorization.granted_tokens - input_tokens - output_tokens,
+            "effectiveFreeAvailableTokens": 1499985,
+        }
+
+    async def release(self, authorization, reason):
+        self.release_calls.append((authorization.request_id, reason))
+        return {"status": "RELEASED"}
+
+    async def status(self, _request_id):
+        raise AssertionError("status should not be needed in the normal fake flow")
+
+    async def close(self):
+        self.closed = True
+
+
 @pytest.fixture()
 def service(tmp_path):
     base = load_settings()
@@ -110,6 +210,7 @@ def service(tmp_path):
         data_dir=tmp_path / "data",
         heartbeat_seconds=1,
         agent_stall_seconds=2,
+        ai_quota=replace(base.ai_quota, enabled=False),
     )
     runner = FakeRunner()
     pusher = FakePusher()
@@ -118,16 +219,19 @@ def service(tmp_path):
         yield client, app, runner, pusher
 
 
-def create_context(client: TestClient, suffix: str):
+def create_context(client: TestClient, suffix: str, mac_address: str | None = None):
+    device = {
+        "device_id": f"device-{suffix}",
+        "client_id": f"client-{suffix}",
+        "product": "CoreS3",
+    }
+    if mac_address:
+        device["mac_address"] = mac_address
     response = client.post(
         "/api/v3/contexts",
         json={
             "label": f"browser-{suffix}",
-            "device": {
-                "device_id": f"device-{suffix}",
-                "client_id": f"client-{suffix}",
-                "product": "CoreS3",
-            },
+            "device": device,
         },
     )
     assert response.status_code == 201, response.text
@@ -136,6 +240,35 @@ def create_context(client: TestClient, suffix: str):
     assert payload["client_id"] == f"client-{suffix}"
     assert payload["created"] is True
     return payload, {TOKEN_HEADER: payload["access_token"]}
+
+
+def quota_service(
+    tmp_path,
+    *,
+    deny_reason: str | None = None,
+    settle_error: AiQuotaError | None = None,
+):
+    base = load_settings()
+    settings = replace(
+        base,
+        data_dir=tmp_path / "quota-data",
+        heartbeat_seconds=1,
+        ai_quota=replace(
+            base.ai_quota,
+            enabled=True,
+            hmac_secret="fake-quota-secret-with-at-least-32-bytes",
+        ),
+    )
+    runner = FakeRunner()
+    quota = FakeQuotaClient(deny_reason, settle_error)
+    quota.runner = runner
+    app = create_app(
+        settings,
+        runner=runner,
+        pusher=FakePusher(),
+        quota_client=quota,
+    )
+    return app, runner, quota
 
 
 def wait_terminal(client: TestClient, task_id: str, headers: dict[str, str], timeout: float = 3):
@@ -148,6 +281,211 @@ def wait_terminal(client: TestClient, task_id: str, headers: dict[str, str], tim
             return payload
         time.sleep(0.02)
     raise AssertionError("task did not finish")
+
+
+def test_ai_quota_authorizes_before_runner_and_settles_trusted_usage(tmp_path):
+    app, runner, quota = quota_service(tmp_path)
+    with TestClient(app) as client:
+        _, headers = create_context(client, "quota-success", "AA:BB:CC:DD:EE:01")
+        response = client.post(
+            "/api/v3/tasks/coding",
+            headers=headers,
+            json={"prompt": "build quota app", "deploy_mode": "none"},
+        )
+        assert response.status_code == 202, response.text
+        task_id = response.json()["task_id"]
+        terminal = wait_terminal(client, task_id, headers)
+        history = client.get(
+            f"/api/v3/tasks/{task_id}/events/history",
+            headers=headers,
+        ).json()["events"]
+
+        assert terminal["status"] == "completed"
+        assert quota.authorize_calls == [(task_id, "AA:BB:CC:DD:EE:01")]
+        assert quota.settle_calls == [(task_id, 15, 5, 2, 3)]
+        assert quota.release_calls == []
+        assert runner.calls
+        event_types = [event["type"] for event in history]
+        assert event_types.index("ai_quota_authorized") < event_types.index("agent_status")
+        assert event_types.index("agent_status") < event_types.index("ai_quota_settled")
+        reservation = app.state.storage.get_ai_quota_reservation(task_id)
+        assert reservation["status"] == "SETTLED"
+        assert reservation["input_tokens"] == 15
+        assert reservation["output_tokens"] == 5
+        assert reservation["cache_creation_input_tokens"] == 2
+        assert reservation["cache_read_input_tokens"] == 3
+        settlement = next(event for event in history if event["type"] == "ai_quota_settled")
+        assert settlement["data"]["input_tokens"] == 15
+        assert settlement["data"]["cache_creation_input_tokens"] == 2
+        assert settlement["data"]["cache_read_input_tokens"] == 3
+        assert settlement["data"]["actual_tokens"] == 20
+
+    assert quota.closed is True
+
+
+def test_ai_quota_denial_fails_task_without_calling_runner(tmp_path):
+    app, runner, quota = quota_service(
+        tmp_path,
+        deny_reason="DAILY_FREE_QUOTA_EXHAUSTED",
+    )
+    with TestClient(app) as client:
+        _, headers = create_context(client, "quota-denied", "AA:BB:CC:DD:EE:02")
+        response = client.post(
+            "/api/v3/tasks/coding",
+            headers=headers,
+            json={"prompt": "must not reach model", "deploy_mode": "none"},
+        )
+        assert response.status_code == 202, response.text
+        task_id = response.json()["task_id"]
+        terminal = wait_terminal(client, task_id, headers)
+
+        assert terminal["status"] == "failed"
+        assert terminal["error"]["code"] == "ai_quota_denied"
+        assert terminal["error"]["quota_reason"] == "DAILY_FREE_QUOTA_EXHAUSTED"
+        assert terminal["error"]["quota"]["effectiveFreeAvailableTokens"] == 0
+        assert runner.calls == []
+        assert quota.settle_calls == []
+        assert app.state.storage.get_ai_quota_reservation(task_id)["status"] == "DENIED"
+
+
+def test_ai_quota_settlement_failure_keeps_trusted_usage_for_reconciliation(tmp_path):
+    app, runner, quota = quota_service(
+        tmp_path,
+        settle_error=AiQuotaError(
+            "ai_quota_transport_error",
+            "settlement response was unavailable",
+            retryable=True,
+        ),
+    )
+    with TestClient(app) as client:
+        _, headers = create_context(client, "quota-settle-failed", "AA:BB:CC:DD:EE:04")
+        response = client.post(
+            "/api/v3/tasks/coding",
+            headers=headers,
+            json={"prompt": "settlement must be retried", "deploy_mode": "none"},
+        )
+        assert response.status_code == 202, response.text
+        task_id = response.json()["task_id"]
+        terminal = wait_terminal(client, task_id, headers)
+
+        assert terminal["status"] == "failed"
+        assert terminal["error"]["code"] == "ai_quota_transport_error"
+        assert runner.calls
+        assert quota.release_calls == []
+        reservation = app.state.storage.get_ai_quota_reservation(task_id)
+        assert reservation["status"] == "SETTLING"
+        assert reservation["input_tokens"] == 15
+        assert reservation["output_tokens"] == 5
+        assert reservation["cache_creation_input_tokens"] == 2
+        assert reservation["cache_read_input_tokens"] == 3
+
+
+def test_ai_quota_keeps_reservation_when_running_task_is_cancelled_without_usage(tmp_path):
+    app, _, quota = quota_service(tmp_path)
+    with TestClient(app) as client:
+        _, headers = create_context(client, "quota-cancel", "AA:BB:CC:DD:EE:03")
+        response = client.post(
+            "/api/v3/tasks/coding",
+            headers=headers,
+            json={"prompt": "slow", "deploy_mode": "none"},
+        )
+        assert response.status_code == 202, response.text
+        task_id = response.json()["task_id"]
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            reservation = app.state.storage.get_ai_quota_reservation(task_id)
+            if reservation and reservation["status"] == "USAGE_UNKNOWN":
+                break
+            time.sleep(0.01)
+        cancelled = client.post(f"/api/v3/tasks/{task_id}/cancel", headers=headers)
+        assert cancelled.status_code == 200
+        terminal = wait_terminal(client, task_id, headers)
+
+        assert terminal["status"] == "cancelled"
+        assert quota.release_calls == []
+        assert quota.settle_calls == []
+        assert app.state.storage.get_ai_quota_reservation(task_id)["status"] == "USAGE_UNKNOWN"
+
+
+def test_ai_quota_releases_reservation_when_cancelled_before_model_request(tmp_path):
+    app, _, quota = quota_service(tmp_path)
+    with TestClient(app) as client:
+        _, headers = create_context(client, "quota-cancel-before-model", "AA:BB:CC:DD:EE:05")
+        response = client.post(
+            "/api/v3/tasks/coding",
+            headers=headers,
+            json={"prompt": "slow-before-model", "deploy_mode": "none"},
+        )
+        assert response.status_code == 202, response.text
+        task_id = response.json()["task_id"]
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            running = client.get(f"/api/v3/tasks/{task_id}", headers=headers).json()
+            if running["stage"] == "coding":
+                break
+            time.sleep(0.01)
+        assert client.post(f"/api/v3/tasks/{task_id}/cancel", headers=headers).status_code == 200
+        assert wait_terminal(client, task_id, headers)["status"] == "cancelled"
+
+        assert quota.release_calls == [(task_id, "CLIENT_CANCELLED")]
+        assert quota.settle_calls == []
+        assert app.state.storage.get_ai_quota_reservation(task_id)["status"] == "RELEASED"
+
+
+def test_ai_quota_settles_partial_usage_when_running_task_is_cancelled(tmp_path):
+    app, _, quota = quota_service(tmp_path)
+    with TestClient(app) as client:
+        _, headers = create_context(client, "quota-cancel-with-usage", "AA:BB:CC:DD:EE:06")
+        response = client.post(
+            "/api/v3/tasks/coding",
+            headers=headers,
+            json={"prompt": "slow-with-usage", "deploy_mode": "none"},
+        )
+        assert response.status_code == 202, response.text
+        task_id = response.json()["task_id"]
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            reservation = app.state.storage.get_ai_quota_reservation(task_id)
+            if reservation and reservation["status"] == "SETTLEMENT_REQUIRED":
+                break
+            time.sleep(0.01)
+        assert client.post(f"/api/v3/tasks/{task_id}/cancel", headers=headers).status_code == 200
+        assert wait_terminal(client, task_id, headers)["status"] == "cancelled"
+
+        assert quota.release_calls == []
+        assert quota.settle_calls == [(task_id, 12, 4, 2, 3)]
+        assert app.state.storage.get_ai_quota_reservation(task_id)["status"] == "SETTLED"
+
+
+def test_ai_quota_requires_mac_for_coding_but_not_direct_run(tmp_path):
+    app, runner, quota = quota_service(tmp_path)
+    with TestClient(app) as client:
+        _, headers = create_context(client, "quota-no-mac")
+        rejected = client.post(
+            "/api/v3/tasks/coding",
+            headers=headers,
+            json={"prompt": "must have mac", "deploy_mode": "none"},
+        )
+        assert rejected.status_code == 422
+        assert rejected.json()["detail"]["code"] == "device_mac_required_for_ai_quota"
+
+        client.post(
+            "/api/v3/files",
+            headers=headers,
+            files={"file": ("main.py", b"print('rerun')\n", "text/plain")},
+        )
+        direct = client.post(
+            "/api/v3/tasks/direct-run",
+            headers=headers,
+            json={"code_path": "main.py", "include_resources": False},
+        )
+        assert direct.status_code == 202, direct.text
+        assert wait_terminal(client, direct.json()["task_id"], headers)["status"] == "completed"
+
+        assert runner.calls == []
+        assert quota.authorize_calls == []
+        assert quota.settle_calls == []
+        assert quota.release_calls == []
 
 
 def test_built_in_web_client_is_served(service):
@@ -183,6 +521,9 @@ def test_built_in_web_client_is_served(service):
     assert 'appendEvent("heartbeat", payload)' not in script.text
     assert 'type !== "heartbeat"' not in script.text
     assert 'RUNTIME_EVENT_TYPES.has(type)' in script.text
+    assert '"ai_quota_settlement_pending"' in script.text
+    assert "cache_creation_input_tokens" in script.text
+    assert "cache_read_input_tokens" in script.text
     assert 'assistant_text_delta' in script.text
     assert 'tool_started' in script.text
     assert 'events/history?after=${after}&limit=1000' in script.text
@@ -504,7 +845,12 @@ def test_device_update_plan_and_no_global_listing(service):
 
 def test_device_id_reconnect_and_session_capacity(tmp_path):
     base = load_settings()
-    settings = replace(base, data_dir=tmp_path / "data", max_sessions=2)
+    settings = replace(
+        base,
+        data_dir=tmp_path / "data",
+        max_sessions=2,
+        ai_quota=replace(base.ai_quota, enabled=False),
+    )
     runner = FakeRunner()
     app = create_app(settings, runner=runner, pusher=FakePusher())
     with TestClient(app) as client:
@@ -644,6 +990,7 @@ def test_global_concurrency_and_queue_limit(tmp_path):
         max_sessions=10,
         max_concurrent_tasks=2,
         max_queued_tasks=1,
+        ai_quota=replace(base.ai_quota, enabled=False),
     )
     runner = FakeRunner()
     app = create_app(settings, runner=runner, pusher=FakePusher())

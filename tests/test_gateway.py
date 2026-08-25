@@ -64,6 +64,7 @@ def test_anonymous_gateway_keeps_core_secret_server_side_and_limits_ai(tmp_path)
         web_ai_tasks_per_session_minute=1,
         web_ai_tasks_per_session_day=10,
         web_ai_tasks_per_ip_day=10,
+        ai_quota=replace(base.ai_quota, enabled=False),
     )
     app = create_gateway_app(settings, runner=GatewayRunner())
 

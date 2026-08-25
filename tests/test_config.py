@@ -22,6 +22,16 @@ TLS_ENV = (
     "TLS_PSEUDONYM_KEY",
     "LOG_TLS_TOPIC_ID",
 )
+QUOTA_ENV = (
+    "AIFLOW_AI_QUOTA_ENABLED",
+    "AIFLOW_AI_QUOTA_BASE_URL",
+    "AIFLOW_AI_QUOTA_CLIENT_ID",
+    "AIFLOW_AI_QUOTA_HMAC_SECRET",
+    "AIFLOW_AI_QUOTA_MODEL",
+    "AIFLOW_AI_QUOTA_REQUESTED_TOKENS",
+    "AIFLOW_AI_QUOTA_TIMEOUT_SECONDS",
+    "AIFLOW_AI_QUOTA_MAX_ATTEMPTS",
+)
 
 
 def clear_auth_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -32,6 +42,50 @@ def clear_auth_env(monkeypatch: pytest.MonkeyPatch) -> None:
 def clear_tls_env(monkeypatch: pytest.MonkeyPatch) -> None:
     for name in TLS_ENV:
         monkeypatch.delenv(name, raising=False)
+
+
+def clear_quota_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in QUOTA_ENV:
+        monkeypatch.delenv(name, raising=False)
+
+
+def test_ai_quota_is_fail_closed_and_reads_secret_only_from_environment(tmp_path, monkeypatch):
+    clear_quota_env(monkeypatch)
+    config = tmp_path / "server.json"
+    config.write_text(json.dumps({"ai_quota": {"enabled": True}}), encoding="utf-8")
+
+    missing = load_settings(config)
+    assert missing.ai_quota.enabled is True
+    assert missing.ai_quota.configured is False
+    assert missing.public_dict([])["ai_quota"] == {
+        "enabled": True,
+        "configured": False,
+        "model": "deepseek-pro",
+        "requested_tokens": 500000,
+    }
+
+    monkeypatch.setenv("AIFLOW_AI_QUOTA_HMAC_SECRET", "fake-quota-secret-with-at-least-32-bytes")
+    configured = load_settings(config)
+    assert configured.ai_quota.configured is True
+    assert "secret" not in json.dumps(configured.public_dict([])).lower()
+
+
+def test_ai_quota_rejects_checked_in_secret_and_oversized_reservation(tmp_path, monkeypatch):
+    clear_quota_env(monkeypatch)
+    config = tmp_path / "server.json"
+    config.write_text(
+        json.dumps({"ai_quota": {"hmac_secret": "must-not-be-checked-in"}}),
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="AIFLOW_AI_QUOTA_HMAC_SECRET"):
+        load_settings(config)
+
+    config.write_text(
+        json.dumps({"ai_quota": {"requested_tokens": 500001}}),
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="must not exceed 500000"):
+        load_settings(config)
 
 
 def test_tls_logging_requires_credentials_and_pseudonym_key(tmp_path, monkeypatch):

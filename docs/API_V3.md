@@ -41,11 +41,13 @@ AIFLOW_CLAUDE_MODEL="your-provider-model-id"
 AIFLOW_CLAUDE_CONTEXT_WINDOW_TOKENS="258000"
 AIFLOW_CLAUDE_MAX_TURNS="30"
 AIFLOW_CLAUDE_SUPPORTS_IMAGE_INPUT="false"
+AIFLOW_AI_QUOTA_ENABLED="true"
+AIFLOW_AI_QUOTA_HMAC_SECRET="<shared-secret-from-secure-deployment-config>"
 ```
 
 使用 `x-api-key` 的提供方将 `ANTHROPIC_AUTH_TOKEN` 替换为 `ANTHROPIC_API_KEY`。两种认证变量不要同时设置。`AIFLOW_CLAUDE_MODEL` 优先于 `server_config.json -> claude.model`；`AIFLOW_CLAUDE_CONTEXT_WINDOW_TOKENS` 和 `AIFLOW_CLAUDE_MAX_TURNS` 分别覆盖 `claude.context_window_tokens`（默认 258K）和 `claude.max_turns`（默认 30）。上下文值通过 Claude Code 的 `CLAUDE_CODE_MAX_CONTEXT_TOKENS` 环境变量控制自动压缩上限，实际可用值仍受第三方模型限制。DeepSeek 等不支持图片输入的模型应设置 `AIFLOW_CLAUDE_SUPPORTS_IMAGE_INPUT=false`，该变量优先于 `server_config.json -> claude.supports_image_input`。密钥不属于 V3 HTTP 请求，网页客户端也不能读取或修改它。
 
-仓库根目录的 `manage.sh` 默认加载 `.env.local`，也可由 `AIFLOW_ENV_FILE` 指定其他文件。使用 `./manage.sh config` 做脱敏检查。第三方端必须兼容 Anthropic Messages API，纯 OpenAI Chat Completions 代理不能直接作为此 URL。
+仓库根目录的 `manage.sh` 默认加载 `.env.local`，也可由 `AIFLOW_ENV_FILE` 指定其他文件。使用 `./manage.sh config` 做脱敏检查。第三方端必须兼容 Anthropic Messages API，纯 OpenAI Chat Completions 代理不能直接作为此 URL。免费额度 HMAC Secret 只从环境读取，不能写入 `server_config.json`、浏览器、设备工作区或日志。
 
 ## 2. 服务发现与容量
 
@@ -73,6 +75,19 @@ AIFLOW_CLAUDE_SUPPORTS_IMAGE_INPUT="false"
 ```
 
 `configured` 只表示服务端发现凭证，不返回 API Key。浏览器不直接连接火山引擎 WebSocket。
+
+免费 Token 额度保护返回同样的脱敏配置状态：
+
+```json
+"ai_quota": {
+  "enabled": true,
+  "configured": true,
+  "model": "deepseek-pro",
+  "requested_tokens": 500000
+}
+```
+
+`configured=false` 时 Coding 会失败关闭，模型不会启动；`direct-run` 不调用模型，仍可使用。可信 SDK usage 会先持久化再结算；结算响应未知时任务失败但不会释放已产生费用的预占，服务重启后会使用相同 usage 幂等重试结算。该 API 不返回额度服务 URL、Client ID、HMAC Secret、设备 MAC、内部 `requestId` 或 `authorizationId`。
 
 ### `GET /api/v3/system/status`
 
@@ -130,7 +145,7 @@ AIFLOW_CLAUDE_SUPPORTS_IMAGE_INPUT="false"
 }
 ```
 
-`device_id` 和 `client_id` 都必填，也接受客户端常用的 `deviceId`、`clientId` 输入别名。`device.mac_address` 是可选字段，同时接受 `device.macAddress` 和 `device.mac` 输入别名，响应和持久化统一使用 `mac_address`。为兼容已经把 MAC 放在请求体外层的客户端，`mac_address`、`macAddress`、`mac` 也可直接作为 `/contexts` 请求体字段；嵌套 `device` 字段优先。旧字段 `push_client_id` 暂时作为 `client_id` 的兼容输入，但响应和持久化统一使用 `client_id`。不传 MAC 的旧客户端请求仍然有效；已有设备重连时省略 MAC 会保留已绑定的 MAC。
+`device_id` 和 `client_id` 都必填，也接受客户端常用的 `deviceId`、`clientId` 输入别名。`device.mac_address` 在连接接口中保持可选，同时接受 `device.macAddress` 和 `device.mac` 输入别名，响应和持久化统一使用 `mac_address`；但 `ai_quota.enabled=true` 时，没有 MAC 的项目提交 Coding 会同步返回 `422 device_mac_required_for_ai_quota`。为兼容已经把 MAC 放在请求体外层的客户端，`mac_address`、`macAddress`、`mac` 也可直接作为 `/contexts` 请求体字段；嵌套 `device` 字段优先。旧字段 `push_client_id` 暂时作为 `client_id` 的兼容输入，但响应和持久化统一使用 `client_id`。已有设备重连时省略 MAC 会保留已绑定的 MAC。
 
 从 API `3.2` 开始，旧项目在再次 Coding 或部署前应使用同一 `deviceId` 携带真实 `clientId` 重连。服务端不会为旧数据生成或猜测 Client ID。
 
@@ -232,6 +247,20 @@ inputs/<conversation_id>/<task_id>/question.wav
 ```
 
 同一消息内的文件名按 Unicode 规范化和大小写折叠后不能重复，避免在不同文件系统中发生静默覆盖。Agent 收到含客户端文件名的相对路径。`claude.supports_image_input=true`（默认）时可按任务需要读取图片；设为 `false` 时，服务通过 SDK `PreToolUse` 拒绝图片 `Read`，同时提示 Agent 只能把图片作为不透明 UIFlow2 资源按路径引用或写入部署清单，不能解码、OCR、描述或猜测内容。SQLite 任务请求只保存类型、MIME、路径、大小和名称，不保存 Base64。限制由 `messages.max_attachments`、`messages.max_attachment_bytes` 和 `messages.max_total_bytes` 配置。
+
+从 API `3.5` 开始，Coding 任务获得执行槽后的费用流程固定为：
+
+```text
+authorize(task_id, device MAC, deepseek-pro, requestedTokens)
+  -> allowed=true 才调用 Claude/DeepSeek Agent
+  -> inputTokens = SDK input_tokens + cache_creation_input_tokens + cache_read_input_tokens
+  -> 成功后用 inputTokens、output_tokens 和两项缓存明细调用 settle
+  -> 失败或取消：未调用模型才 release；已有 usage 则 settle；usage 未知时保留待核对
+```
+
+授权发生在后台任务中，因此正常创建仍返回 `202`；额度不足通过任务 `error.code=ai_quota_denied`、`quota_reason` 和非敏感 `quota` 返回。鉴权未配置、HMAC/网络异常或结算无法确认也会使任务失败，不会在不确认授权时调用模型。服务用 `task_id` 作为幂等 quota `requestId`，每次 HTTP 重试使用新 nonce；授权、结算和释放超时按内部 `status` 确认。内部 `authorizationId` 只存于服务端 SQLite，不进入公开 API 或 TLS 对话日志。
+
+默认申请上游单次上限 `500000` Token，并在 `expires_at` 前 5 秒中止仍未结束的 Agent。Claude Agent 是多轮请求，最终结算使用 SDK 返回的整轮可信 usage；`input_tokens` 对外表示包含缓存创建和缓存读取的输入总量，两项缓存字段只是分类明细，不会再次加入 `actual_tokens=input_tokens+output_tokens`。浏览器不能提交 Token 数。上游当前不支持续期或超过 500K 的单次结算，因此客户端不应自动重试 `ai_quota_usage_missing`、`ai_quota_authorization_expired`、`ai_quota_usage_exceeds_reservation` 或结算冲突，需由服务端运维核查。
 
 ### `POST /api/v3/asr`
 
@@ -343,7 +372,7 @@ max_concurrent_tasks + max_queued_tasks
 
 资源项的 `devicePath` 是相对设备 Flash 根目录的目录，例如 `res/img/` 或 `res/audio/`，不能包含资源文件名。它与 UIFlow 运行时的 `/flash/res/img/...`、`file://flash/res/audio/...` 表示同一位置；省略时由上传接口按扩展名自动分配。代码和资源都不能引用工作区的 `.claude`、`.aiflow` 或 `.git` 内部文件。
 
-该任务使用同一并发槽和队列限制。
+该任务使用同一并发槽和队列限制，但不调用模型，不申请或结算 AI Token 额度。
 
 ### `POST /api/v3/deployments/plan`
 
@@ -361,6 +390,8 @@ max_concurrent_tasks + max_queued_tasks
 - `queue_position`。
 - `heartbeat_age_seconds`、`agent_silence_seconds`、`possibly_stalled`。
 - `result`、`error`、`last_event`。
+
+额度拒绝时 `error` 还包含 `quota_reason` 与额度服务返回的非敏感 `quota`；内部签名、MAC、`requestId` 和 `authorizationId` 不会返回。
 
 状态机：
 
@@ -397,7 +428,21 @@ queued -> running -> completed
 - 输出：`assistant_message_started`、`assistant_text_delta`、`assistant_message`、`assistant_message_finished`；模型思考为 `agent_reasoning`，中断兜底为 `agent_partial_capture`。
 - 工具：`tool_started`、`tool_finished`、`server_tool_started`、`server_tool_finished`、`agent_user_message`、`agent_user_content`。
 - 原始流状态：`agent_stream_event`。
-- 服务任务：`task_queued`、`task_started`、`file_ready`、`deployment_started`、`deployment_finished`、`cancellation_requested`、`task_completed`、`task_failed`、`task_cancelled`、`heartbeat`。
+- 服务任务：`task_queued`、`task_started`、`ai_quota_authorized`、`ai_quota_settled`、`ai_quota_settlement_pending`、`ai_quota_released`、`ai_quota_release_failed`、`file_ready`、`deployment_started`、`deployment_finished`、`cancellation_requested`、`task_completed`、`task_failed`、`task_cancelled`、`heartbeat`。
+
+额度事件只公开批准/结算 Token 数、剩余额度摘要、到期时间和释放原因。客户端可以展示这些事件，但 `GET /api/v3/tasks/{task_id}` 仍是终态权威来源。`ai_quota_settled.data` 的稳定用量字段如下：
+
+```json
+{
+  "input_tokens": 120000,
+  "output_tokens": 80000,
+  "cache_creation_input_tokens": 30000,
+  "cache_read_input_tokens": 70000,
+  "actual_tokens": 200000
+}
+```
+
+`input_tokens` 已包含普通输入、缓存创建和缓存读取 Token；缓存字段是其中的分类明细，客户端不得再次求和。`ai_quota_settlement_pending` 表示模型可能已产生用量，但结算尚未确认或 usage 未知，服务不会盲目释放预占。`ai_quota_release_failed` 表示确认零消费后的释放结果未知。两类异常都会保留 SQLite 记录供重启补偿，上游也会在授权过期后自动释放。
 
 Agent 的所有公开文本块使用用户本人最近一条可识别的自然语言；用户明确指定回复语言时优先。服务不会根据 UIFlow/API 术语、Skill/MCP、官方文档、代码、日志或工具结果的语种切换回复语言。混合语言请求以用户自然语言句子的主体为准，代码、命令、API 名称、标识符和产品名在直译不自然时保留原文。当前请求无语种信号时沿用会话中最近的用户语种；全新且只有附件的请求使用客户端默认简体中文。
 
@@ -435,6 +480,7 @@ Agent 的所有公开文本块使用用户本人最近一条可识别的自然�
 | `409` | `context_busy` | 同一设备已有活跃任务 |
 | `413` | `attachment_too_large` 等 | 上传或 Base64 附件超过限制 |
 | `422` | 请求校验错误 | 缺少必填附件 `name` 等字段 |
+| `422` | `device_mac_required_for_ai_quota` | 额度保护已启用，但当前设备项目没有 MAC |
 | `422` | `device_target_missing` 等 | 部署前验证失败 |
 | `403` | `cross_site_request_rejected` | 匿名修改请求不是同源或允许的 Origin |
 | `429` | `web_rate_limit_*` | 匿名会话或来源 IP 限额触发；响应包含 `Retry-After` 和 `retry_after_seconds` |
