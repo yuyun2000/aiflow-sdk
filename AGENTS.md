@@ -34,8 +34,10 @@
 - 分析后台通过只读火山引擎 TLS `SearchLogsV2` 拉取 `aiflow_conversation_trace`，不得读取或修改 AIFlow 主服务 SQLite。日常本地运行和配置检查使用 `cd analytics && ./manage.sh ...`。
 - TLS 物理记录先进入 `raw_records`，完整分块再组装为 `events`，最后按 `turn_id` 重建 `turns`、`tool_calls` 和 `turn_model_usage`；不要绕过原始层或用不完整分块制造事件。
 - 总 Token 口径固定为“未缓存输入 + 缓存读取 + 缓存写入 + 输出”；缓存命中率固定为“缓存读取 /（未缓存输入 + 缓存读取 + 缓存写入）”。费用优先按 `analytics/model_pricing.json` 的逐模型价格计算，SDK `total_cost_usd` 仅作为 Claude 计价参考。
+- Claude Code 的零用量 `<synthetic>` 只作为原始追踪记录保留，不进入模型展示或计费完整性判断；纯零用量任务按已知 `$0.00` 处理，synthetic 错误回复不得覆盖运行时主模型。任何非零 synthetic 用量仍需显式展示，避免漏算。
 - TLS 顶层 `mac_address` 是可选设备统计维度。缺失、空白、`null` 或 `none` 的旧日志不计入设备数和设备明细；常见 MAC 格式统一为大写冒号格式。旧分析库升级必须非破坏性加列，并从 `raw_records.raw_json` 回填已有非空 MAC，不要求重拉 TLS。
 - 最近活动按项目、会话、任务分层展示；会话按 `(project_id, conversation_id)` 识别，内部任务按时间顺序排列。用户消息保持突出，thinking、模型回复、工具和模型用量默认折叠。
+- 分析趋势图将任务/工具次数放左轴、Token 放右轴；模型、计费、工具、状态和数据质量面板允许拖动排序并在浏览器本地保存。模型 API P95 和部署成功率必须通过可聚焦问号说明 SDK 耗时与部署尝试口径。
 - 分析后台的详细数据契约、同步规则、测试矩阵和浏览器验收要求以 `analytics/AGENTS.md` 为准。
 
 ## Runtime Architecture Invariants

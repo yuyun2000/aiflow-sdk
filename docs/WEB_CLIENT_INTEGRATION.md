@@ -177,7 +177,7 @@ async function startCoding(deviceId, { text = "", images = [], audio = [], deplo
 - “生成并运行”：`deploy_mode=server`。
 - 只有明确需要 Agent 自行控制部署步骤时使用 `agent`。
 
-任务返回 `202` 后立即进入任务界面。`queue_position` 不为空时展示“排队第 N 位”，不要让 HTTP 请求等待 Agent 完成。额度授权在任务获得执行槽后发生：只有 `ai_quota_authorized` 到达后才会启动模型；额度不足最终表现为 `task_failed`，其中 `error.code=ai_quota_denied`、`quota_reason` 区分每日额度、终身额度、设备停用等原因。客户端不得通过自动重复提交绕过额度结果。
+任务返回 `202` 后立即进入任务界面。`queue_position` 不为空时展示“排队第 N 位”，不要让 HTTP 请求等待 Agent 完成。每次模型请求前会依次收到 `ai_quota_authorizing` 和 `ai_quota_authorized`；后者只表示额度服务返回 `allowed=true`，不表示 AIFlow 做过 Token 预估或预占。工具执行不产生额度事件，工具结果触发下一轮模型请求时会出现新的 `model_request_index`。任意一次 `allowed=false` 都会停止该次及后续模型请求并最终表现为 `task_failed`，其中 `error.code=ai_quota_denied`、`quota_reason` 区分每日额度、终身额度、设备停用等原因。授权事件的 `data.quota` 和额度拒绝的 `error.quota` 都包含每日/终身免费 Token 总额度及剩余额度，客户端不得通过自动重复提交绕过额度结果。
 
 ## 6. SSE 与恢复
 
@@ -187,9 +187,10 @@ function watchTask(task, handlers) {
   url.searchParams.set("stream_token", task.stream_token);
   const source = new EventSource(url);
   const types = [
-    "task_queued", "task_started", "ai_quota_authorized", "ai_quota_settled",
-    "ai_quota_settlement_pending",
-    "ai_quota_released", "ai_quota_release_failed", "agent_connected", "agent_system",
+    "task_queued", "task_started", "ai_quota_authorizing",
+    "ai_quota_authorized", "ai_quota_settled",
+    "ai_quota_settlement_pending", "ai_quota_no_usage",
+    "agent_connected", "agent_system",
     "agent_status", "agent_warning", "agent_reasoning", "agent_partial_capture",
     "agent_stream_event",
     "agent_sdk_event", "agent_user_message", "agent_user_content",
@@ -234,7 +235,9 @@ async function getTask(deviceId, taskId) {
 
 状态中的 `queue_position`、`stage`、`possibly_stalled` 是权威生命周期信息。`progress` 是兼容字段，只会在排队/运行时为 `0`、终态为 `100`；它不是模型完成百分比，客户端不得显示成 20%、50% 等进度，也不得据此推测模型正在做什么。`possibly_stalled=true` 时展示警告和取消按钮，不要自动重复请求。
 
-额度事件不包含内部 `requestId`、`authorizationId`、MAC 或签名。`ai_quota_settled` 的 `input_tokens`、`output_tokens`、`cache_creation_input_tokens`、`cache_read_input_tokens` 来自服务端收到的可信 SDK usage；其中 `input_tokens` 已包含两项缓存 Token，`actual_tokens=input_tokens+output_tokens`，前端不能重复加入缓存明细。前端只展示这些数字，不能上报或覆盖。`ai_quota_settlement_pending` 表示任务虽已失败或取消，但模型可能已经产生费用，服务端保留预占等待补偿；客户端不得据此自动重试任务。`direct-run` 不产生模型费用，因此不会出现这些额度事件。
+额度事件不包含内部 `requestId`、`authorizationId`、模型代理令牌、MAC 或签名。`model_request_index` 是任务内从 1 开始的展示序号，不是幂等 ID。`ai_quota_authorizing` 和 `ai_quota_authorized` 都不包含 `requested_tokens` 或 `granted_tokens`。`ai_quota_authorized.data.quota` 与额度拒绝的 `task_failed.data.error.quota` 使用额度服务原始 camelCase 字段：`dailyFreeLimitTokens`、`lifetimeFreeLimitTokens` 表示设备总额度，`dailyFreeAvailableTokens`、`lifetimeFreeAvailableTokens` 表示服务端判定时的剩余额度，`effectiveFreeAvailableTokens` 是实际可用免费额度，`paidAvailableTokens` 是付费余额。客户端应同时展示剩余量和总量，并兼容旧服务暂时缺少 `*LimitTokens` 的响应。
+
+`ai_quota_settled` 的四项用量来自该次模型 HTTP 响应的可信 usage，而不是任务末尾汇总；其中 `input_tokens` 已包含两项缓存 Token，`actual_tokens=input_tokens+output_tokens`，前端不能重复加入缓存明细。模型思考和回复共用所在响应的同一份 usage，不会各产生一条结算事件。前端只展示这些数字，不能上报或覆盖。结算响应目前没有 `*LimitTokens`，客户端不得用本地常量补造。`ai_quota_settlement_pending` 表示实际用量已保存但服务端记账尚未确认，或模型响应没有可核算 usage；它是记账告警，不代表任务失败，也不会阻止下一次模型请求重新授权。`ai_quota_no_usage` 表示模型上游明确拒绝且没有可计费用量。`direct-run` 不产生模型费用，因此不会出现这些额度事件。
 
 ## 7. deviceId 项目与历史恢复
 

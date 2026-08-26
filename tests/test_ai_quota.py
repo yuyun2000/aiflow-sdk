@@ -17,7 +17,6 @@ from aiflow_server.ai_quota import (
 )
 from aiflow_server.config import AiQuotaSettings
 
-
 SECRET = "fake-quota-hmac-secret-with-at-least-32-bytes"
 
 
@@ -28,7 +27,6 @@ def quota_settings(**overrides) -> AiQuotaSettings:
         "client_id": "test-aiflow-client",
         "hmac_secret": SECRET,
         "model": "deepseek-pro",
-        "requested_tokens": 500000,
         "timeout_seconds": 1,
         "max_attempts": 2,
     }
@@ -90,7 +88,6 @@ def test_authorize_preserves_context_path_and_signs_final_body():
             "requestId": "task_123",
             "mac": "AA:BB:CC:DD:EE:FF",
             "model": "deepseek-pro",
-            "requestedTokens": 500000,
         }
         return httpx.Response(
             200,
@@ -101,9 +98,17 @@ def test_authorize_preserves_context_path_and_signs_final_body():
                     "allowed": True,
                     "requestId": "task_123",
                     "authorizationId": "qa_test_authorization",
-                    "grantedTokens": 500000,
+                    "grantedTokens": 123456,
                     "expiresAt": "2026-08-25T12:10:00+08:00",
-                    "quota": {"effectiveFreeAvailableTokens": 1500000},
+                    "quota": {
+                        "dailyFreeLimitTokens": 10000000,
+                        "lifetimeFreeLimitTokens": 25000000,
+                        "dailyFreeAvailableTokens": 1500000,
+                        "lifetimeFreeAvailableTokens": 16500000,
+                        "effectiveFreeAvailableTokens": 1500000,
+                        "paidAvailableTokens": 0,
+                        "internalReservationCount": 1,
+                    },
                 },
             },
         )
@@ -123,8 +128,82 @@ def test_authorize_preserves_context_path_and_signs_final_body():
 
     authorization = asyncio.run(exercise())
     assert authorization.authorization_id == "qa_test_authorization"
-    assert authorization.granted_tokens == 500000
+    assert authorization.granted_tokens == 123456
+    assert authorization.quota == {
+        "dailyFreeLimitTokens": 10000000,
+        "lifetimeFreeLimitTokens": 25000000,
+        "dailyFreeAvailableTokens": 1500000,
+        "lifetimeFreeAvailableTokens": 16500000,
+        "effectiveFreeAvailableTokens": 1500000,
+        "paidAvailableTokens": 0,
+    }
     assert len(requests) == 1
+
+
+def test_authorize_allows_request_when_response_only_contains_allowed_decision():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert json.loads(request.content) == {
+            "requestId": "task_allowed_only",
+            "mac": "aabbccddeeff",
+            "model": "deepseek-pro",
+        }
+        return httpx.Response(
+            200,
+            json={
+                "code": 200,
+                "msg": "",
+                "data": {"allowed": True},
+            },
+        )
+
+    async def exercise():
+        http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        client = AiQuotaClient(quota_settings(), client=http_client)
+        authorization = await client.authorize("task_allowed_only", "aabbccddeeff")
+        await http_client.aclose()
+        return authorization
+
+    authorization = asyncio.run(exercise())
+    assert authorization.request_id == "task_allowed_only"
+    assert authorization.authorization_id is None
+    assert authorization.granted_tokens is None
+    assert authorization.expires_at is None
+
+
+def test_authorize_preserves_negative_server_available_quota():
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "code": 200,
+                "msg": "",
+                "data": {
+                    "allowed": False,
+                    "reason": "DAILY_FREE_QUOTA_EXHAUSTED",
+                    "requestId": "task_negative_quota",
+                    "quota": {
+                        "dailyFreeLimitTokens": 2000000,
+                        "lifetimeFreeLimitTokens": 5000000,
+                        "dailyFreeAvailableTokens": -120,
+                        "lifetimeFreeAvailableTokens": 3100000,
+                        "effectiveFreeAvailableTokens": -120,
+                        "paidAvailableTokens": 0,
+                    },
+                },
+            },
+        )
+
+    async def exercise():
+        http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        client = AiQuotaClient(quota_settings(), client=http_client)
+        with pytest.raises(AiQuotaDenied) as captured:
+            await client.authorize("task_negative_quota", "aabbccddeeff")
+        await http_client.aclose()
+        return captured.value
+
+    error = asyncio.run(exercise())
+    assert error.quota["dailyFreeAvailableTokens"] == -120
+    assert error.quota["effectiveFreeAvailableTokens"] == -120
 
 
 def test_authorize_timeout_uses_status_before_reusing_reservation():
@@ -344,12 +423,32 @@ def test_settle_rejects_response_with_mismatched_cache_usage():
     assert error.code == "ai_quota_invalid_response"
 
 
-def test_settle_rejects_usage_over_granted_tokens_before_http_request():
+def test_settle_reports_actual_usage_even_when_it_exceeds_legacy_granted_tokens():
     requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        payload = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "code": 200,
+                "msg": "",
+                "data": {
+                    "settled": True,
+                    "requestId": "task_over_limit",
+                    "inputTokens": payload["inputTokens"],
+                    "outputTokens": payload["outputTokens"],
+                    "cacheCreationInputTokens": payload["cacheCreationInputTokens"],
+                    "cacheReadInputTokens": payload["cacheReadInputTokens"],
+                    "actualTokens": payload["inputTokens"] + payload["outputTokens"],
+                },
+            },
+        )
 
     async def exercise():
         http_client = httpx.AsyncClient(
-            transport=httpx.MockTransport(lambda request: requests.append(request))
+            transport=httpx.MockTransport(handler)
         )
         client = AiQuotaClient(quota_settings(), client=http_client)
         authorization = AiQuotaAuthorization(
@@ -359,14 +458,13 @@ def test_settle_rejects_usage_over_granted_tokens_before_http_request():
             expires_at="2026-08-25T12:10:00+08:00",
             quota={},
         )
-        with pytest.raises(AiQuotaError) as captured:
-            await client.settle(authorization, 10, 5, 2, 3)
+        result = await client.settle(authorization, 10, 5, 2, 3)
         await http_client.aclose()
-        return captured.value
+        return result
 
-    error = asyncio.run(exercise())
-    assert error.code == "ai_quota_usage_exceeds_reservation"
-    assert requests == []
+    result = asyncio.run(exercise())
+    assert result["actualTokens"] == 15
+    assert len(requests) == 1
 
 
 def test_release_validates_authorization_identity():
@@ -429,7 +527,14 @@ def test_quota_denial_is_a_normal_fail_closed_decision():
                     "allowed": False,
                     "reason": "DAILY_FREE_QUOTA_EXHAUSTED",
                     "requestId": "task_denied",
-                    "quota": {"effectiveFreeAvailableTokens": 0},
+                    "quota": {
+                        "dailyFreeLimitTokens": 10000000,
+                        "lifetimeFreeLimitTokens": 25000000,
+                        "dailyFreeAvailableTokens": 0,
+                        "lifetimeFreeAvailableTokens": 23200000,
+                        "effectiveFreeAvailableTokens": 0,
+                        "paidAvailableTokens": 0,
+                    },
                 },
             },
         )
@@ -444,4 +549,6 @@ def test_quota_denial_is_a_normal_fail_closed_decision():
 
     error = asyncio.run(exercise())
     assert error.reason == "DAILY_FREE_QUOTA_EXHAUSTED"
+    assert error.quota["dailyFreeLimitTokens"] == 10000000
+    assert error.quota["lifetimeFreeLimitTokens"] == 25000000
     assert error.quota["effectiveFreeAvailableTokens"] == 0

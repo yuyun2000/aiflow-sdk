@@ -1,17 +1,16 @@
 from __future__ import annotations
 
-import json
-import os
 import base64
 import binascii
+import json
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from .asr import AsrSettings, DEFAULT_URL, DEFAULT_RESOURCE_ID
-
+from .asr import DEFAULT_RESOURCE_ID, DEFAULT_URL, AsrSettings
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG_PATH = ROOT_DIR / "server_config.json"
@@ -146,7 +145,6 @@ class AiQuotaSettings:
     client_id: str
     hmac_secret: str
     model: str
-    requested_tokens: int | None
     timeout_seconds: float
     max_attempts: int
 
@@ -226,7 +224,7 @@ class Settings:
 
     def public_dict(self, available_skills: list[str]) -> dict[str, Any]:
         return {
-            "api_version": "3.5",
+            "api_version": "3.7",
             "agent": "claude-code",
             "model": self.claude_model or "claude-code-default",
             "fallback_model": self.claude_fallback_model,
@@ -265,7 +263,7 @@ class Settings:
                 "enabled": self.ai_quota.enabled,
                 "configured": self.ai_quota.configured,
                 "model": self.ai_quota.model,
-                "requested_tokens": self.ai_quota.requested_tokens,
+                "authorization_mode": "server_decision_per_model_request",
             },
             "web_gateway": {
                 "anonymous": True,
@@ -344,17 +342,6 @@ def load_settings(path: str | Path | None = None) -> Settings:
         or _nested(data, "ai_quota", "enabled", True),
         "ai_quota.enabled",
     )
-    raw_requested_tokens = (
-        os.environ.get("AIFLOW_AI_QUOTA_REQUESTED_TOKENS")
-        or _nested(data, "ai_quota", "requested_tokens", 500000)
-    )
-    ai_quota_requested_tokens = (
-        None
-        if raw_requested_tokens in (None, "")
-        else _positive_int(raw_requested_tokens, "ai_quota.requested_tokens")
-    )
-    if ai_quota_requested_tokens is not None and ai_quota_requested_tokens > 500000:
-        raise ConfigError("ai_quota.requested_tokens must not exceed 500000")
     ai_quota_timeout = _non_negative_float(
         os.environ.get("AIFLOW_AI_QUOTA_TIMEOUT_SECONDS")
         or _nested(data, "ai_quota", "timeout_seconds", 5),
@@ -578,7 +565,6 @@ def load_settings(path: str | Path | None = None) -> Settings:
                 os.environ.get("AIFLOW_AI_QUOTA_MODEL")
                 or _nested(data, "ai_quota", "model", "deepseek-pro")
             ).strip(),
-            requested_tokens=ai_quota_requested_tokens,
             timeout_seconds=ai_quota_timeout,
             max_attempts=_positive_int(
                 os.environ.get("AIFLOW_AI_QUOTA_MAX_ATTEMPTS")

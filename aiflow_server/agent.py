@@ -6,9 +6,10 @@ import json
 import logging
 import os
 import re
+from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass, is_dataclass
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import TYPE_CHECKING, Any
 
 from claude_agent_sdk import (
     AssistantMessage,
@@ -33,6 +34,9 @@ from . import __version__
 from .config import Settings
 from .telemetry import TLS_EVENT_DATA_KEY
 from .workspaces import WorkspaceManager
+
+if TYPE_CHECKING:
+    from .model_proxy import ModelQuotaSession
 
 
 EmitCallback = Callable[[str, dict[str, Any]], Awaitable[None]]
@@ -1106,6 +1110,8 @@ class ClaudeRunner:
         deploy_mode: str,
         emit: EmitCallback,
         cancel_event: asyncio.Event,
+        *,
+        quota_session: ModelQuotaSession | None = None,
     ) -> AgentRunResult:
         workspace = self.workspaces.workspace_for(context["context_id"])
         requested_skills = _run_skills(self.settings.enabled_skills, deploy_mode)
@@ -1131,6 +1137,8 @@ class ClaudeRunner:
 
         device = context["device"]
         env = _agent_env(self.settings, workspace, device, agent_deploy)
+        if quota_session is not None:
+            env["ANTHROPIC_BASE_URL"] = quota_session.proxy_base_url
 
         mcp_servers: dict[str, Any] = {}
         if self.settings.m5stack_mcp_enabled:
@@ -1175,6 +1183,8 @@ class ClaudeRunner:
 
         result: AgentRunResult | None = None
         event_secrets = _event_secrets(device)
+        if quota_session is not None:
+            event_secrets.extend(quota_session.secret_values)
         stream_tracker = _StreamMessageTracker()
         tool_result_deduplicator = _ToolResultDeduplicator()
         latest_root_response_id: str | None = None
@@ -1230,7 +1240,6 @@ class ClaudeRunner:
                 )
                 if cancel_event.is_set():
                     raise AgentCancelled()
-                await emit("model_request_started", {"stage": "coding"})
                 await client.query(user_prompt)
 
                 async for message in client.receive_response():
@@ -1650,11 +1659,19 @@ class ClaudeRunner:
         except AgentError:
             raise
         except ClaudeSDKError as exc:
-            raise AgentError("claude_sdk_error", str(exc), retryable=False) from exc
+            raise AgentError(
+                "claude_sdk_error",
+                _sanitize_text(str(exc), workspace, event_secrets),
+                retryable=False,
+            ) from exc
         except Exception as exc:
             if cancel_event.is_set():
                 raise AgentCancelled() from exc
-            raise AgentError("agent_runtime_error", str(exc), retryable=False) from exc
+            raise AgentError(
+                "agent_runtime_error",
+                _sanitize_text(str(exc), workspace, event_secrets),
+                retryable=False,
+            ) from exc
         finally:
             for partial_block in stream_tracker.pending_partial_blocks():
                 try:

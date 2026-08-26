@@ -29,9 +29,12 @@ const RAW_ONLY_AGENT_EVENTS = new Set([
 const EVENT_TYPES = [
   "task_queued",
   "task_started",
+  "ai_quota_authorizing",
   "ai_quota_authorized",
   "ai_quota_settled",
   "ai_quota_settlement_pending",
+  "ai_quota_no_usage",
+  // Legacy events remain readable in stored task history.
   "ai_quota_released",
   "ai_quota_release_failed",
   "agent_connected",
@@ -68,9 +71,11 @@ const EVENT_TYPES = [
 const RUNTIME_EVENT_TYPES = new Set([
   "task_queued",
   "task_started",
+  "ai_quota_authorizing",
   "ai_quota_authorized",
   "ai_quota_settled",
   "ai_quota_settlement_pending",
+  "ai_quota_no_usage",
   "ai_quota_released",
   "ai_quota_release_failed",
   "cancellation_requested",
@@ -87,11 +92,13 @@ const RUNTIME_EVENT_TYPES = new Set([
 const EVENT_LABELS = {
   task_queued: "任务排队",
   task_started: "任务启动",
+  ai_quota_authorizing: "AI 额度检查",
   ai_quota_authorized: "AI 额度授权",
   ai_quota_settled: "AI 额度结算",
-  ai_quota_settlement_pending: "AI 额度待核对",
-  ai_quota_released: "AI 额度释放",
-  ai_quota_release_failed: "AI 额度异常",
+  ai_quota_settlement_pending: "AI 记账待确认",
+  ai_quota_no_usage: "AI 请求无用量",
+  ai_quota_released: "旧额度记录清理",
+  ai_quota_release_failed: "旧额度记录待确认",
   cancellation_requested: "取消请求",
   task_completed: "任务完成",
   task_failed: "任务失败",
@@ -725,6 +732,22 @@ function eventData(event) {
   return event?.data && typeof event.data === "object" ? event.data : (event || {});
 }
 
+function quotaAvailabilityText(quota) {
+  if (!quota || typeof quota !== "object") return "";
+  const parts = [];
+  for (const [label, availableKey, limitKey] of [
+    ["每日", "dailyFreeAvailableTokens", "dailyFreeLimitTokens"],
+    ["终身", "lifetimeFreeAvailableTokens", "lifetimeFreeLimitTokens"],
+  ]) {
+    const available = quota[availableKey];
+    const limit = quota[limitKey];
+    if (Number.isInteger(available) && Number.isInteger(limit) && limit >= 0) {
+      parts.push(`${label}剩余 ${available.toLocaleString("zh-CN")} / ${limit.toLocaleString("zh-CN")}`);
+    }
+  }
+  return parts.length ? `（${parts.join("；")}）` : "";
+}
+
 function eventMessage(type, event) {
   const data = event.data || event;
   if (type === "task_queued") {
@@ -733,16 +756,29 @@ function eventMessage(type, event) {
   if (type === "task_started") {
     return data.stage === "authorizing_ai_quota" ? "任务已开始，正在检查 AI Token 额度" : "任务已开始，正在准备独立工作区";
   }
-  if (type === "ai_quota_authorized") return `AI Token 额度已放行，本次最多 ${data.granted_tokens ?? "--"} Token`;
-  if (type === "ai_quota_settled") {
-    return `AI Token 已结算，共 ${data.actual_tokens ?? "--"} Token（输入 ${data.input_tokens ?? "--"}，输出 ${data.output_tokens ?? "--"}，缓存创建 ${data.cache_creation_input_tokens ?? 0}，缓存读取 ${data.cache_read_input_tokens ?? 0}）`;
+  if (type === "ai_quota_authorizing") {
+    return `正在向额度服务检查第 ${data.model_request_index ?? "--"} 次模型请求`;
   }
-  if (type === "ai_quota_settlement_pending") return "模型可能已产生用量，额度预占保留等待核对";
-  if (type === "ai_quota_released") return "未完成请求的 AI Token 预占已释放";
-  if (type === "ai_quota_release_failed") return "AI Token 预占释放状态暂未确认";
+  if (type === "ai_quota_authorized") {
+    return `额度服务已放行第 ${data.model_request_index ?? "--"} 次模型请求${quotaAvailabilityText(data.quota)}`;
+  }
+  if (type === "ai_quota_settled") {
+    return `第 ${data.model_request_index ?? "--"} 次模型请求已结算，共 ${data.actual_tokens ?? "--"} Token（输入 ${data.input_tokens ?? "--"}，输出 ${data.output_tokens ?? "--"}，缓存创建 ${data.cache_creation_input_tokens ?? 0}，缓存读取 ${data.cache_read_input_tokens ?? 0}）`;
+  }
+  if (type === "ai_quota_settlement_pending") {
+    return data.reason === "usage_unknown"
+      ? "模型响应未提供可核算的 Token 用量，已记录待核对"
+      : "实际用量已保存，等待服务端记账补偿";
+  }
+  if (type === "ai_quota_no_usage") return "本次模型请求未产生可计费用量";
+  if (type === "ai_quota_released") return "旧版额度记录已完成清理";
+  if (type === "ai_quota_release_failed") return "旧版额度记录清理状态暂未确认";
   if (type === "cancellation_requested") return "已提交取消请求，等待当前操作停止";
   if (type === "task_completed") return "任务已完成";
-  if (type === "task_failed") return data.error?.message || data.message || "任务执行失败";
+  if (type === "task_failed") {
+    const message = data.error?.message || data.message || "任务执行失败";
+    return data.error?.code === "ai_quota_denied" ? `${message}${quotaAvailabilityText(data.error.quota)}` : message;
+  }
   if (type === "task_cancelled") return "任务已取消";
   if (type === "deployment_started") return "正在把已验证的代码和资源推送到设备";
   if (type === "deployment_finished") return "代码和资源已提交到设备服务";

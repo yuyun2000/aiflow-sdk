@@ -129,8 +129,21 @@ h1, h2, h3, p { margin: 0; }
 .health-stats div { min-width: 0; }
 .health-stats span { display: block; color: var(--muted); font-size: 10px; }
 .health-stats strong { display: block; margin-top: 7px; overflow: hidden; font-size: 14px; font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
+.health-stats .metric-label { display: flex; align-items: center; gap: 4px; }
+.info-tip { position: relative; display: inline-flex !important; flex: 0 0 auto; }
+.info-button { display: inline-grid; place-items: center; width: 16px; height: 16px; padding: 0; border: 1px solid var(--line-strong); border-radius: 50%; background: var(--surface); color: var(--muted); font-size: 10px; font-weight: 700; line-height: 1; }
+.info-button:hover, .info-button:focus-visible { border-color: var(--teal); outline: none; color: var(--teal); }
+.info-popover { position: absolute; z-index: 30; bottom: calc(100% + 8px); left: -12px; display: none !important; width: min(290px, calc(100vw - 40px)); padding: 9px 10px; border: 1px solid var(--line-strong); border-radius: 5px; background: var(--ink); color: #fff !important; box-shadow: var(--shadow); font-size: 10px !important; font-weight: 400; line-height: 1.55; }
+.info-popover.align-right { right: -8px; left: auto; }
+.info-tip:hover .info-popover, .info-tip:focus-within .info-popover { display: block !important; }
 
 .split-grid .panel { min-height: 272px; padding: 19px 20px; }
+.panel-heading-actions { display: flex; align-items: flex-start; gap: 7px; }
+.panel-drag-handle { flex: 0 0 auto; width: 28px; height: 28px; padding: 0; border: 1px solid transparent; border-radius: 4px; background: transparent; color: var(--muted); font-size: 16px; font-weight: 700; line-height: 1; letter-spacing: 0; touch-action: none; cursor: grab; }
+.panel-drag-handle:hover, .panel-drag-handle:focus-visible { border-color: var(--line-strong); outline: none; background: var(--surface-soft); color: var(--ink); }
+.panel-drag-handle:active { cursor: grabbing; }
+.sortable-panel { transition: border-color .16s ease, box-shadow .16s ease, opacity .16s ease; }
+.sortable-panel.dragging { border-color: var(--teal); box-shadow: 0 8px 24px rgba(27, 37, 48, .12); opacity: .72; }
 .pricing-list { margin-top: 13px; border-top: 1px solid var(--line); }
 .pricing-model-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 31px; border-bottom: 1px solid var(--line); color: var(--ink); font-size: 10px; }
 .pricing-model-heading strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

@@ -5,10 +5,11 @@ import json
 import secrets
 import sqlite3
 import time
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any
 
 from .config import TlsLoggingSettings
 from .telemetry import (
@@ -16,7 +17,6 @@ from .telemetry import (
     initialize_tls_outbox,
     should_enqueue_trace_event,
 )
-
 
 TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
 
@@ -119,10 +119,12 @@ class Storage:
                 );
                 CREATE INDEX IF NOT EXISTS idx_events_task_sequence ON task_events(task_id, sequence);
                 CREATE TABLE IF NOT EXISTS ai_quota_reservations (
-                    task_id TEXT PRIMARY KEY,
-                    request_id TEXT NOT NULL UNIQUE,
+                    request_id TEXT PRIMARY KEY,
+                    task_id TEXT NOT NULL,
+                    request_index INTEGER NOT NULL,
                     authorization_id TEXT UNIQUE,
                     model TEXT NOT NULL,
+                    requested_tokens INTEGER,
                     granted_tokens INTEGER,
                     status TEXT NOT NULL,
                     input_tokens INTEGER,
@@ -132,6 +134,7 @@ class Storage:
                     expires_at TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
+                    UNIQUE(task_id, request_index),
                     FOREIGN KEY(task_id) REFERENCES tasks(task_id) ON DELETE CASCADE
                 );
                 CREATE INDEX IF NOT EXISTS idx_ai_quota_status ON ai_quota_reservations(status);
@@ -337,10 +340,80 @@ class Storage:
             row["name"]
             for row in db.execute("PRAGMA table_info(ai_quota_reservations)").fetchall()
         }
+        if not columns:
+            return
         missing_cache_columns = not {
             "cache_creation_input_tokens",
             "cache_read_input_tokens",
         }.issubset(columns)
+        if "request_index" not in columns:
+            legacy_columns = set(columns)
+            db.execute("DROP INDEX IF EXISTS idx_ai_quota_status")
+            db.execute("ALTER TABLE ai_quota_reservations RENAME TO ai_quota_reservations_legacy")
+            db.execute(
+                """
+                CREATE TABLE ai_quota_reservations (
+                    request_id TEXT PRIMARY KEY,
+                    task_id TEXT NOT NULL,
+                    request_index INTEGER NOT NULL,
+                    authorization_id TEXT UNIQUE,
+                    model TEXT NOT NULL,
+                    requested_tokens INTEGER,
+                    granted_tokens INTEGER,
+                    status TEXT NOT NULL,
+                    input_tokens INTEGER,
+                    output_tokens INTEGER,
+                    cache_creation_input_tokens INTEGER,
+                    cache_read_input_tokens INTEGER,
+                    expires_at TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(task_id, request_index),
+                    FOREIGN KEY(task_id) REFERENCES tasks(task_id) ON DELETE CASCADE
+                )
+                """
+            )
+            cache_creation = (
+                "cache_creation_input_tokens"
+                if "cache_creation_input_tokens" in legacy_columns
+                else "NULL"
+            )
+            cache_read = (
+                "cache_read_input_tokens"
+                if "cache_read_input_tokens" in legacy_columns
+                else "NULL"
+            )
+            migrated_status = (
+                "status"
+                if not missing_cache_columns
+                else "CASE "
+                "WHEN status IN ('SETTLEMENT_REQUIRED', 'SETTLING') THEN 'USAGE_UNKNOWN' "
+                "WHEN status='RESERVED' AND EXISTS ("
+                "SELECT 1 FROM tasks WHERE tasks.task_id=ai_quota_reservations_legacy.task_id "
+                "AND tasks.status NOT IN ('completed', 'failed', 'cancelled') "
+                "AND tasks.stage='coding') THEN 'USAGE_UNKNOWN' "
+                "ELSE status END"
+            )
+            db.execute(
+                f"""
+                INSERT INTO ai_quota_reservations(
+                    request_id, task_id, request_index, authorization_id, model,
+                    requested_tokens, granted_tokens, status, input_tokens,
+                    output_tokens, cache_creation_input_tokens,
+                    cache_read_input_tokens, expires_at, created_at, updated_at
+                )
+                SELECT request_id, task_id, 1, authorization_id, model,
+                       granted_tokens, granted_tokens, {migrated_status}, input_tokens,
+                       output_tokens, {cache_creation}, {cache_read}, expires_at,
+                       created_at, updated_at
+                FROM ai_quota_reservations_legacy
+                """
+            )
+            db.execute("DROP TABLE ai_quota_reservations_legacy")
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_ai_quota_status ON ai_quota_reservations(status)"
+            )
+            return
         if "cache_creation_input_tokens" not in columns:
             db.execute(
                 "ALTER TABLE ai_quota_reservations ADD COLUMN cache_creation_input_tokens INTEGER"
@@ -632,24 +705,33 @@ class Storage:
             row = db.execute("SELECT * FROM tasks WHERE task_id=?", (task_id,)).fetchone()
         return self._task_row(row) if row else None
 
-    def begin_ai_quota_request(self, task_id: str, request_id: str, model: str) -> None:
+    def begin_ai_quota_request(
+        self,
+        task_id: str,
+        request_id: str,
+        model: str,
+        *,
+        request_index: int = 1,
+        requested_tokens: int | None = None,
+    ) -> None:
         now = utc_now()
         with self.connect() as db:
             db.execute(
                 """
                 INSERT INTO ai_quota_reservations(
-                    task_id, request_id, model, status, created_at, updated_at
-                ) VALUES (?, ?, ?, 'AUTHORIZING', ?, ?)
-                ON CONFLICT(task_id) DO UPDATE SET updated_at=excluded.updated_at
+                    request_id, task_id, request_index, model, requested_tokens,
+                    status, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, 'AUTHORIZING', ?, ?)
+                ON CONFLICT(request_id) DO UPDATE SET updated_at=excluded.updated_at
                 """,
-                (task_id, request_id, model, now, now),
+                (request_id, task_id, request_index, model, requested_tokens, now, now),
             )
 
     def authorize_ai_quota(
         self,
-        task_id: str,
-        authorization_id: str,
-        granted_tokens: int,
+        request_id: str,
+        authorization_id: str | None,
+        granted_tokens: int | None,
         expires_at: str | None,
     ) -> None:
         with self.connect() as db:
@@ -657,15 +739,15 @@ class Storage:
                 """
                 UPDATE ai_quota_reservations
                 SET authorization_id=?, granted_tokens=?, expires_at=?,
-                    status='RESERVED', updated_at=?
-                WHERE task_id=?
+                    status='AUTHORIZED', updated_at=?
+                WHERE request_id=?
                 """,
-                (authorization_id, granted_tokens, expires_at, utc_now(), task_id),
+                (authorization_id, granted_tokens, expires_at, utc_now(), request_id),
             )
 
     def update_ai_quota_status(
         self,
-        task_id: str,
+        request_id: str,
         status: str,
         *,
         input_tokens: int | None = None,
@@ -691,20 +773,37 @@ class Storage:
             if value is not None:
                 assignments.append(f"{name}=?")
                 values.append(value)
-        values.append(task_id)
+        values.append(request_id)
         with self.connect() as db:
             db.execute(
-                f"UPDATE ai_quota_reservations SET {', '.join(assignments)} WHERE task_id=?",
+                f"UPDATE ai_quota_reservations SET {', '.join(assignments)} WHERE request_id=?",
                 values,
             )
 
     def get_ai_quota_reservation(self, task_id: str) -> dict[str, Any] | None:
         with self.connect() as db:
             row = db.execute(
-                "SELECT * FROM ai_quota_reservations WHERE task_id=?",
+                """
+                SELECT * FROM ai_quota_reservations
+                WHERE task_id=?
+                ORDER BY request_index DESC
+                LIMIT 1
+                """,
                 (task_id,),
             ).fetchone()
         return dict(row) if row else None
+
+    def list_ai_quota_reservations(self, task_id: str) -> list[dict[str, Any]]:
+        with self.connect() as db:
+            rows = db.execute(
+                """
+                SELECT * FROM ai_quota_reservations
+                WHERE task_id=?
+                ORDER BY request_index ASC
+                """,
+                (task_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def list_open_ai_quota_reservations(self) -> list[dict[str, Any]]:
         with self.connect() as db:
@@ -712,8 +811,8 @@ class Storage:
                 """
                 SELECT * FROM ai_quota_reservations
                 WHERE status IN (
-                    'AUTHORIZING', 'RESERVED', 'USAGE_UNKNOWN',
-                    'SETTLEMENT_REQUIRED', 'SETTLING'
+                    'AUTHORIZING', 'AUTHORIZED', 'RESERVED', 'USAGE_UNKNOWN',
+                    'SETTLEMENT_REQUIRED', 'SETTLING', 'RELEASING'
                 )
                 ORDER BY created_at ASC
                 """

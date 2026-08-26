@@ -5,7 +5,6 @@ import base64
 import hashlib
 import time
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -25,7 +24,17 @@ class FakeRunner:
         self.active = 0
         self.max_active = 0
 
-    async def run(self, task_id, context, prompt, deploy_mode, emit, cancel_event):
+    async def run(
+        self,
+        task_id,
+        context,
+        prompt,
+        deploy_mode,
+        emit,
+        cancel_event,
+        *,
+        quota_session=None,
+    ):
         self.calls.append(
             (
                 task_id,
@@ -42,7 +51,14 @@ class FakeRunner:
                 await asyncio.sleep(0.01)
             self.active -= 1
             raise AgentCancelled()
-        await emit("model_request_started", {"stage": "coding"})
+        first_lease = None
+        if quota_session is not None:
+            try:
+                first_lease = await quota_session.authorize()
+            except Exception:
+                self.active -= 1
+                raise
+            await quota_session.mark_forwarded(first_lease)
         await emit("tool_started", {"stage": "writing_files", "progress": 60, "message": "Writing main.py"})
         await emit("agent_status", {"stage": "agent_starting", "progress": 20, "message": "late SDK status"})
         if prompt == "thinking":
@@ -81,11 +97,18 @@ class FakeRunner:
                 )
                 while not cancel_event.is_set():
                     await asyncio.sleep(0.01)
+                if first_lease is not None:
+                    await quota_session.settle(first_lease, (12, 4, 2, 3))
                 raise AgentCancelled()
             if prompt == "slow":
                 while not cancel_event.is_set():
                     await asyncio.sleep(0.01)
                 raise AgentCancelled()
+            if first_lease is not None:
+                await quota_session.settle(first_lease, (15, 5, 2, 3))
+                second_lease = await quota_session.authorize()
+                await quota_session.mark_forwarded(second_lease)
+                await quota_session.settle(second_lease, (7, 3, 1, 1))
             await asyncio.sleep(0.3 if prompt == "delay" else 0.02)
             return AgentRunResult(
                 session_id="00000000-0000-4000-8000-000000000001",
@@ -144,20 +167,32 @@ class FakeQuotaClient:
         self.closed = False
 
     async def authorize(self, request_id, mac):
-        if self.runner is not None:
-            assert self.runner.calls == []
         self.authorize_calls.append((request_id, mac))
         if self.deny_reason:
             raise AiQuotaDenied(
                 self.deny_reason,
-                {"effectiveFreeAvailableTokens": 0},
+                {
+                    "dailyFreeLimitTokens": 10000000,
+                    "lifetimeFreeLimitTokens": 25000000,
+                    "dailyFreeAvailableTokens": 0,
+                    "lifetimeFreeAvailableTokens": 23200000,
+                    "effectiveFreeAvailableTokens": 0,
+                    "paidAvailableTokens": 0,
+                },
             )
         return AiQuotaAuthorization(
             request_id=request_id,
-            authorization_id="qa_fake_authorization",
-            granted_tokens=500000,
-            expires_at=(datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat(),
-            quota={"effectiveFreeAvailableTokens": 1500000},
+            authorization_id=f"qa_fake_{len(self.authorize_calls)}",
+            granted_tokens=1,
+            expires_at=None,
+            quota={
+                "dailyFreeLimitTokens": 10000000,
+                "lifetimeFreeLimitTokens": 25000000,
+                "dailyFreeAvailableTokens": 1500000,
+                "lifetimeFreeAvailableTokens": 16500000,
+                "effectiveFreeAvailableTokens": 1500000,
+                "paidAvailableTokens": 0,
+            },
         )
 
     async def settle(
@@ -187,7 +222,6 @@ class FakeQuotaClient:
             "outputTokens": output_tokens,
             "cacheCreationInputTokens": cache_creation_input_tokens,
             "cacheReadInputTokens": cache_read_input_tokens,
-            "releasedTokens": authorization.granted_tokens - input_tokens - output_tokens,
             "effectiveFreeAvailableTokens": 1499985,
         }
 
@@ -301,24 +335,35 @@ def test_ai_quota_authorizes_before_runner_and_settles_trusted_usage(tmp_path):
         ).json()["events"]
 
         assert terminal["status"] == "completed"
-        assert quota.authorize_calls == [(task_id, "AA:BB:CC:DD:EE:01")]
-        assert quota.settle_calls == [(task_id, 15, 5, 2, 3)]
+        assert [call[0] for call in quota.authorize_calls] == [
+            f"{task_id}:model:1",
+            f"{task_id}:model:2",
+        ]
+        assert all(call[1] == "AA:BB:CC:DD:EE:01" for call in quota.authorize_calls)
+        assert all(len(call) == 2 for call in quota.authorize_calls)
+        assert quota.settle_calls == [
+            (f"{task_id}:model:1", 15, 5, 2, 3),
+            (f"{task_id}:model:2", 7, 3, 1, 1),
+        ]
         assert quota.release_calls == []
         assert runner.calls
         event_types = [event["type"] for event in history]
+        assert event_types.count("ai_quota_authorizing") == 2
+        assert event_types.count("ai_quota_authorized") == 2
+        assert event_types.count("ai_quota_settled") == 2
         assert event_types.index("ai_quota_authorized") < event_types.index("agent_status")
-        assert event_types.index("agent_status") < event_types.index("ai_quota_settled")
-        reservation = app.state.storage.get_ai_quota_reservation(task_id)
-        assert reservation["status"] == "SETTLED"
-        assert reservation["input_tokens"] == 15
-        assert reservation["output_tokens"] == 5
-        assert reservation["cache_creation_input_tokens"] == 2
-        assert reservation["cache_read_input_tokens"] == 3
-        settlement = next(event for event in history if event["type"] == "ai_quota_settled")
-        assert settlement["data"]["input_tokens"] == 15
-        assert settlement["data"]["cache_creation_input_tokens"] == 2
-        assert settlement["data"]["cache_read_input_tokens"] == 3
-        assert settlement["data"]["actual_tokens"] == 20
+        authorized = next(event for event in history if event["type"] == "ai_quota_authorized")
+        assert authorized["data"]["quota"]["dailyFreeLimitTokens"] == 10000000
+        assert authorized["data"]["quota"]["lifetimeFreeLimitTokens"] == 25000000
+        reservations = app.state.storage.list_ai_quota_reservations(task_id)
+        assert [row["status"] for row in reservations] == ["SETTLED", "SETTLED"]
+        assert [row["input_tokens"] for row in reservations] == [15, 7]
+        assert [row["output_tokens"] for row in reservations] == [5, 3]
+        settlements = [event for event in history if event["type"] == "ai_quota_settled"]
+        assert settlements[0]["data"]["model_request_index"] == 1
+        assert settlements[0]["data"]["actual_tokens"] == 20
+        assert settlements[1]["data"]["model_request_index"] == 2
+        assert settlements[1]["data"]["actual_tokens"] == 10
 
     assert quota.closed is True
 
@@ -342,13 +387,15 @@ def test_ai_quota_denial_fails_task_without_calling_runner(tmp_path):
         assert terminal["status"] == "failed"
         assert terminal["error"]["code"] == "ai_quota_denied"
         assert terminal["error"]["quota_reason"] == "DAILY_FREE_QUOTA_EXHAUSTED"
+        assert terminal["error"]["quota"]["dailyFreeLimitTokens"] == 10000000
+        assert terminal["error"]["quota"]["lifetimeFreeLimitTokens"] == 25000000
         assert terminal["error"]["quota"]["effectiveFreeAvailableTokens"] == 0
-        assert runner.calls == []
+        assert runner.calls
         assert quota.settle_calls == []
         assert app.state.storage.get_ai_quota_reservation(task_id)["status"] == "DENIED"
 
 
-def test_ai_quota_settlement_failure_keeps_trusted_usage_for_reconciliation(tmp_path):
+def test_ai_quota_settlement_failure_keeps_usage_without_failing_task(tmp_path):
     app, runner, quota = quota_service(
         tmp_path,
         settle_error=AiQuotaError(
@@ -367,17 +414,21 @@ def test_ai_quota_settlement_failure_keeps_trusted_usage_for_reconciliation(tmp_
         assert response.status_code == 202, response.text
         task_id = response.json()["task_id"]
         terminal = wait_terminal(client, task_id, headers)
+        history = client.get(
+            f"/api/v3/tasks/{task_id}/events/history",
+            headers=headers,
+        ).json()["events"]
 
-        assert terminal["status"] == "failed"
-        assert terminal["error"]["code"] == "ai_quota_transport_error"
+        assert terminal["status"] == "completed"
         assert runner.calls
         assert quota.release_calls == []
-        reservation = app.state.storage.get_ai_quota_reservation(task_id)
-        assert reservation["status"] == "SETTLING"
-        assert reservation["input_tokens"] == 15
-        assert reservation["output_tokens"] == 5
-        assert reservation["cache_creation_input_tokens"] == 2
-        assert reservation["cache_read_input_tokens"] == 3
+        assert len(quota.authorize_calls) == 2
+        assert len(quota.settle_calls) == 2
+        reservations = app.state.storage.list_ai_quota_reservations(task_id)
+        assert [row["status"] for row in reservations] == ["SETTLING", "SETTLING"]
+        assert [row["input_tokens"] for row in reservations] == [15, 7]
+        assert [row["output_tokens"] for row in reservations] == [5, 3]
+        assert [event["type"] for event in history].count("ai_quota_settlement_pending") == 2
 
 
 def test_ai_quota_keeps_reservation_when_running_task_is_cancelled_without_usage(tmp_path):
@@ -427,9 +478,10 @@ def test_ai_quota_releases_reservation_when_cancelled_before_model_request(tmp_p
         assert client.post(f"/api/v3/tasks/{task_id}/cancel", headers=headers).status_code == 200
         assert wait_terminal(client, task_id, headers)["status"] == "cancelled"
 
-        assert quota.release_calls == [(task_id, "CLIENT_CANCELLED")]
+        assert quota.authorize_calls == []
+        assert quota.release_calls == []
         assert quota.settle_calls == []
-        assert app.state.storage.get_ai_quota_reservation(task_id)["status"] == "RELEASED"
+        assert app.state.storage.get_ai_quota_reservation(task_id) is None
 
 
 def test_ai_quota_settles_partial_usage_when_running_task_is_cancelled(tmp_path):
@@ -453,7 +505,7 @@ def test_ai_quota_settles_partial_usage_when_running_task_is_cancelled(tmp_path)
         assert wait_terminal(client, task_id, headers)["status"] == "cancelled"
 
         assert quota.release_calls == []
-        assert quota.settle_calls == [(task_id, 12, 4, 2, 3)]
+        assert quota.settle_calls == [(f"{task_id}:model:1", 12, 4, 2, 3)]
         assert app.state.storage.get_ai_quota_reservation(task_id)["status"] == "SETTLED"
 
 
@@ -505,7 +557,7 @@ def test_built_in_web_client_is_served(service):
     assert 'class="progress-shell"' not in page.text
     assert 'id="agent-summary"' not in page.text
     assert 'src="/client-assets/assistant-stream.js?v=20260731-stream-perf"' in page.text
-    assert 'src="/client-assets/app.js?v=20260731-stream-perf"' in page.text
+    assert 'src="/client-assets/app.js?v=20260826-server-quota-gate"' in page.text
     assert page.headers["cache-control"] == "no-store, max-age=0"
 
     script = client.get("/client-assets/app.js")
@@ -522,6 +574,10 @@ def test_built_in_web_client_is_served(service):
     assert 'type !== "heartbeat"' not in script.text
     assert 'RUNTIME_EVENT_TYPES.has(type)' in script.text
     assert '"ai_quota_settlement_pending"' in script.text
+    assert '"ai_quota_no_usage"' in script.text
+    assert "实际用量已保存，等待服务端记账补偿" in script.text
+    assert "预计最多" not in script.text
+    assert "data.granted_tokens" not in script.text
     assert "cache_creation_input_tokens" in script.text
     assert "cache_read_input_tokens" in script.text
     assert 'assistant_text_delta' in script.text

@@ -5,14 +5,14 @@ import hmac
 import json
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 from urllib.parse import quote
 
 import httpx
 
 from .config import AiQuotaSettings
-
 
 CANONICAL_PREFIX = "/internal/v1/aiQuota"
 
@@ -41,7 +41,7 @@ class AiQuotaDenied(AiQuotaError):
         messages = {
             "DAILY_FREE_QUOTA_EXHAUSTED": "今日免费 AI Token 额度已用完，请明日再试",
             "LIFETIME_FREE_QUOTA_EXHAUSTED": "该设备的终身免费 AI Token 额度已用完",
-            "INSUFFICIENT_QUOTA": "剩余 AI Token 额度不足以覆盖本次请求",
+            "INSUFFICIENT_QUOTA": "额度服务未放行本次 AI 模型请求",
             "DEVICE_DISABLED": "该设备的 AI 服务已停用，请联系管理员",
             "AUTHORIZATION_RELEASED": "本次 AI 额度授权已释放，请重新提交任务",
             "AUTHORIZATION_EXPIRED": "本次 AI 额度授权已过期，请重新提交任务",
@@ -59,8 +59,8 @@ class AiQuotaDenied(AiQuotaError):
 @dataclass(frozen=True)
 class AiQuotaAuthorization:
     request_id: str
-    authorization_id: str
-    granted_tokens: int
+    authorization_id: str | None
+    granted_tokens: int | None
     expires_at: str | None
     quota: dict[str, Any]
 
@@ -124,7 +124,13 @@ def _required_positive_int(data: dict[str, Any], name: str) -> int:
 def quota_summary(quota: dict[str, Any] | None) -> dict[str, int]:
     if not quota:
         return {}
+    limit_fields = {
+        "dailyFreeLimitTokens",
+        "lifetimeFreeLimitTokens",
+    }
     allowed = {
+        "dailyFreeLimitTokens",
+        "lifetimeFreeLimitTokens",
         "dailyFreeAvailableTokens",
         "lifetimeFreeAvailableTokens",
         "effectiveFreeAvailableTokens",
@@ -136,7 +142,7 @@ def quota_summary(quota: dict[str, Any] | None) -> dict[str, int]:
         if name in allowed
         and isinstance(value, int)
         and not isinstance(value, bool)
-        and value >= 0
+        and (name not in limit_fields or value >= 0)
     }
 
 
@@ -245,15 +251,38 @@ class AiQuotaClient:
         return data
 
     @staticmethod
-    def _authorization_from_data(data: dict[str, Any]) -> AiQuotaAuthorization:
+    def _authorization_from_data(
+        data: dict[str, Any],
+        *,
+        request_id: str | None = None,
+    ) -> AiQuotaAuthorization:
+        response_request_id = data.get("requestId")
+        if request_id is None:
+            request_id = _required_string(data, "requestId")
+        elif response_request_id not in {None, request_id}:
+            raise AiQuotaError(
+                "ai_quota_invalid_response",
+                "AI quota authorization response did not match the requested ID",
+                retryable=False,
+            )
+        authorization_id = data.get("authorizationId")
+        if not isinstance(authorization_id, str) or not authorization_id:
+            authorization_id = None
+        granted_tokens = data.get("grantedTokens", data.get("reservedTokens"))
+        if (
+            isinstance(granted_tokens, bool)
+            or not isinstance(granted_tokens, int)
+            or granted_tokens <= 0
+        ):
+            granted_tokens = None
+        expires_at = data.get("expiresAt")
+        if not isinstance(expires_at, str) or not expires_at:
+            expires_at = None
         return AiQuotaAuthorization(
-            request_id=_required_string(data, "requestId"),
-            authorization_id=_required_string(data, "authorizationId"),
-            granted_tokens=_required_positive_int(
-                data,
-                "grantedTokens" if "grantedTokens" in data else "reservedTokens",
-            ),
-            expires_at=_required_string(data, "expiresAt"),
+            request_id=request_id,
+            authorization_id=authorization_id,
+            granted_tokens=granted_tokens,
+            expires_at=expires_at,
             quota=quota_summary(data.get("quota") if isinstance(data.get("quota"), dict) else None),
         )
 
@@ -320,14 +349,16 @@ class AiQuotaClient:
             )
         return data
 
-    async def authorize(self, request_id: str, mac: str) -> AiQuotaAuthorization:
+    async def authorize(
+        self,
+        request_id: str,
+        mac: str,
+    ) -> AiQuotaAuthorization:
         payload: dict[str, Any] = {
             "requestId": request_id,
             "mac": mac,
             "model": self.settings.model,
         }
-        if self.settings.requested_tokens is not None:
-            payload["requestedTokens"] = self.settings.requested_tokens
 
         last_error: AiQuotaError | None = None
         for _ in range(self.settings.max_attempts):
@@ -344,8 +375,8 @@ class AiQuotaClient:
                 except AiQuotaError:
                     continue
                 status = state.get("status")
-                if status == "RESERVED":
-                    return self._authorization_from_data(state)
+                if status in {"RESERVED", "AUTHORIZED", "ALLOWED"}:
+                    return self._authorization_from_data(state, request_id=request_id)
                 if status == "SETTLED":
                     raise AiQuotaError(
                         "ai_quota_already_settled",
@@ -361,7 +392,7 @@ class AiQuotaClient:
                 continue
 
             allowed = data.get("allowed")
-            if data.get("requestId") != request_id:
+            if data.get("requestId") not in {None, request_id}:
                 raise AiQuotaError(
                     "ai_quota_invalid_response",
                     "AI quota authorization response did not match the requested ID",
@@ -379,7 +410,7 @@ class AiQuotaClient:
                     "AI quota authorization response did not include an allowed decision",
                     retryable=False,
                 )
-            return self._authorization_from_data(data)
+            return self._authorization_from_data(data, request_id=request_id)
 
         if last_error is not None:
             raise last_error
@@ -418,15 +449,7 @@ class AiQuotaClient:
                 "AI quota cache token details cannot exceed total input tokens",
                 retryable=False,
             )
-        if input_tokens + output_tokens > authorization.granted_tokens:
-            raise AiQuotaError(
-                "ai_quota_usage_exceeds_reservation",
-                "Trusted model token usage exceeded the authorized reservation",
-                retryable=False,
-                service_error_code="ACTUAL_TOKENS_EXCEED_RESERVATION",
-            )
         payload = {
-            "authorizationId": authorization.authorization_id,
             "requestId": authorization.request_id,
             "model": self.settings.model,
             "inputTokens": input_tokens,
@@ -434,6 +457,8 @@ class AiQuotaClient:
             "cacheCreationInputTokens": cache_creation_input_tokens,
             "cacheReadInputTokens": cache_read_input_tokens,
         }
+        if authorization.authorization_id:
+            payload["authorizationId"] = authorization.authorization_id
         last_error: AiQuotaError | None = None
         for _ in range(self.settings.max_attempts):
             try:

@@ -99,7 +99,7 @@ AIFLOW_WEB_COOKIE_SECURE="true"
 - 修改请求必须来自同源或 `server.cors_origins` 明确允许的 Origin，减少 CSRF 和站外盗用。
 - 网关同时按签名匿名会话与来源 IP 限制普通请求和 AI 任务；清 cookie 不能绕过 IP 日限额。
 - 核心继续执行全局 AI 日限额、单进程有界队列和同设备单任务约束。
-- Coding 获得执行槽后先按设备 MAC 向 m5stack 额度服务预占 Token；只有 `allowed=true` 才启动 Agent。结算输入量为 SDK `input_tokens + cache_creation_input_tokens + cache_read_input_tokens`，再加 `output_tokens` 得到实际总量，缓存明细不会重复扣减。失败或取消时，确认模型未调用才释放；已有可信 usage 则结算；模型可能已调用但 usage 未知时保留预占等待补偿。`direct-run` 不调用模型，因此不走额度接口。
+- Coding Agent 的每个真实模型请求都先按设备 MAC 询问额度服务，只有 `allowed=true` 才转发；AIFlow 不估算或预占 Token。每次响应 usage 单独结算，任务汇总 usage 不重复上报；记账未确认只保留补偿记录，不反过来使模型响应失败。`direct-run` 不调用模型，因此不走额度接口。
 - 对公网高流量场景，在 Nginx/CDN 再加 IP/ASN 限速、异常封禁和 Turnstile/验证码。无登录产品想进一步限制机器人，这一层不可省略。
 
 限额在 [server_config.json](server_config.json) 的 `web_gateway` 和 `cost_guard` 中机械配置。`./manage.sh config` 会打印当前值且不显示模型密钥。完整边界见 [CLIENT_SECURITY.md](docs/CLIENT_SECURITY.md)。
@@ -134,7 +134,13 @@ AIFLOW_AI_QUOTA_HMAC_SECRET="<use-the-shared-secret-provided-out-of-band>"
 - `AIFLOW_CLAUDE_SUPPORTS_IMAGE_INPUT`：模型是否支持图片输入。DeepSeek 等纯文本模型设为 `false`；默认 `true`。
 - `AIFLOW_AI_QUOTA_HMAC_SECRET`：m5stack 免费 Token 额度服务的共享密钥，只能放在 `.env.local` 或外部环境文件。额度保护默认启用；缺少密钥、签名失败、网络结果未知或 `allowed=false` 时均在调用模型前失败关闭。
 
-`server_config.json -> ai_quota` 保存非敏感默认值。当前固定以 `deepseek-pro` 申请单次上限 `500000` Token，尽量覆盖 Claude Agent 多轮累计 usage；可用 `AIFLOW_AI_QUOTA_REQUESTED_TOKENS` 下调，但不能超过上游单次上限。授权在任务真正获得执行槽后才申请，避免排队消耗 10 分钟有效期。Agent 超过授权有效期仍未结束时会被中止；四项可信 usage 会在调用结算接口前持久化。服务重启后会释放确认尚未调用模型的预占，使用完全相同的 usage 重试待结算记录，并保留用量未知的记录而不盲目按零消费释放。
+`server_config.json -> ai_quota` 保存非敏感默认值。Coding Agent 的每个真实 `/messages` 模型请求都会单独走 `authorize -> 模型请求 -> settle`。授权请求只发送 `requestId`、设备 MAC 和模型名，不发送或计算 `requestedTokens`；AIFlow 只采用额度服务的 `allowed` 决定是否转发，不比较本地余额、批准量或过期时间。工具在本地执行时不单独计费；工具结果触发下一轮模型请求时会再次询问额度服务。每次响应的 input/output/cache usage 会先写 SQLite 再立即上报，任务末尾 SDK 汇总 usage 只用于展示和日志，不再上报额度服务。
+
+额度代理只允许本机回环访问，目标固定为启动服务时的 `ANTHROPIC_BASE_URL`，并为每个任务生成短期能力令牌；内部路径会在访问日志和 Agent 错误中脱敏。真实 usage 的结算未确认时会保留本地 `SETTLING` 记录供服务重启后幂等补偿，但不会把已经成功的模型响应或整个任务改判失败，也不会阻止下一次模型请求重新授权。模型明确拒绝且没有 usage 时只记录 `NO_USAGE`，新流程不调用预占释放接口。
+
+额度服务必须同步采用“余额是否为正”的纯放行语义：授权时不能因本次可能用量未知而预占或要求覆盖整个请求；只要当前余额为正就返回 `allowed=true`，实际结算可把余额扣成负数，下一次授权再拒绝。若仍部署附件中的旧版默认预占和 `actualTokens <= grantedTokens` 校验，AIFlow 虽不会在本地拦截，但结算仍会被旧服务端拒绝。服务间详细契约见 [docs/AI_QUOTA_SERVICE_INTEGRATION.md](docs/AI_QUOTA_SERVICE_INTEGRATION.md)。
+
+授权成功事件和额度拒绝错误中的 `quota` 会向下游透传每日/终身免费 Token 的总额度与剩余额度；字段保持额度服务的 camelCase 命名。结算响应目前只包含结算后的剩余额度，因此结算事件不补造总额度。
 
 `.env.local` 默认不进入 Git。也可以通过 `AIFLOW_ENV_FILE=/secure/path/provider.env` 指向部署环境生成的配置文件。修改后检查并重启：
 
@@ -201,7 +207,7 @@ AIFLOW_MAX_CONCURRENT_TASKS
 AIFLOW_MAX_QUEUED_TASKS
 ```
 
-Claude Code SDK 会继承服务进程环境。当前服务显式用 `AIFLOW_CLAUDE_MODEL`/`claude.model` 固定模型，并保留 `ANTHROPIC_BASE_URL` 和认证变量给 Claude Code CLI 使用。
+Claude Code SDK 会继承服务进程环境。当前服务显式用 `AIFLOW_CLAUDE_MODEL`/`claude.model` 固定模型；启用额度保护时，传给 Claude Code CLI 的 `ANTHROPIC_BASE_URL` 会替换为本机逐请求额度代理，代理再使用服务进程原始 `ANTHROPIC_BASE_URL` 和继承的认证变量访问固定模型上游。
 
 `context_window_tokens` 通过 Claude Code CLI 的 `CLAUDE_CODE_MAX_CONTEXT_TOKENS` 环境变量生效；这是自动压缩阈值/有效上下文上限，不是 Anthropic SDK 的任意 `context_window` 参数。对于支持更大上下文的第三方模型，可以把它提高到提供方允许的值；本项目默认使用 258K。`max_turns` 同时传给 Claude Agent SDK 的 `ClaudeAgentOptions.max_turns`。
 

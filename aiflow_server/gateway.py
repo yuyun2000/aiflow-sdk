@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import ipaddress
 import json
+import logging
 import secrets
 import sqlite3
 import threading
@@ -12,7 +13,6 @@ import time
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
 from urllib.parse import urlsplit
 
 import httpx
@@ -23,6 +23,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from . import __version__
 from .app import TOKEN_HEADER, create_app
 from .config import Settings, load_settings
+from .model_proxy import INTERNAL_MODEL_PROXY_PREFIX, ModelProxyError
 from .security import (
     AUTH_VERSION_HEADER,
     CONTENT_HASH_HEADER,
@@ -65,6 +66,28 @@ INTERNAL_AUTH_HEADERS = {
 }
 
 RateCounter = tuple[str, str, int, int, str]
+
+
+class _ModelProxyAccessLogFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if not isinstance(args, tuple) or len(args) < 3:
+            return True
+        path = args[2]
+        prefix = INTERNAL_MODEL_PROXY_PREFIX + "/"
+        if not isinstance(path, str) or not path.startswith(prefix):
+            return True
+        suffix = path[len(prefix) :]
+        separator = suffix.find("/")
+        redacted_suffix = suffix[separator:] if separator >= 0 else ""
+        record.args = (*args[:2], prefix + "[redacted]" + redacted_suffix, *args[3:])
+        return True
+
+
+def _install_model_proxy_access_log_filter() -> None:
+    access_logger = logging.getLogger("uvicorn.access")
+    if not any(isinstance(item, _ModelProxyAccessLogFilter) for item in access_logger.filters):
+        access_logger.addFilter(_ModelProxyAccessLogFilter())
 
 
 class GatewayRateLimiter:
@@ -236,6 +259,7 @@ def create_gateway_app(
     runner=None,
     pusher=None,
 ) -> FastAPI:
+    _install_model_proxy_access_log_filter()
     public_settings = settings or load_settings()
     internal_secret = secrets.token_bytes(32)
     session_secret = secrets.token_bytes(32)
@@ -280,6 +304,8 @@ def create_gateway_app(
 
     @app.middleware("http")
     async def anonymous_web_guard(request: Request, call_next):
+        if request.url.path.startswith(INTERNAL_MODEL_PROXY_PREFIX + "/"):
+            return await call_next(request)
         session_id = _read_session_cookie(session_secret, request.cookies.get(WEB_SESSION_COOKIE))
         new_session = session_id is None
         if session_id is None:
@@ -526,6 +552,59 @@ def create_gateway_app(
             generate(),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"},
+        )
+
+    @app.api_route(
+        INTERNAL_MODEL_PROXY_PREFIX + "/{token}/{upstream_path:path}",
+        methods=["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
+    )
+    async def model_proxy(
+        request: Request,
+        token: str,
+        upstream_path: str,
+    ) -> Response:
+        client_host = request.client.host if request.client else ""
+        try:
+            is_loopback = ipaddress.ip_address(client_host).is_loopback
+        except ValueError:
+            is_loopback = False
+        if not is_loopback:
+            raise HTTPException(status_code=404, detail="not found")
+
+        registry = app.state.core_tasks.model_proxy_registry
+        session = registry.get(token)
+        if session is None:
+            raise HTTPException(status_code=404, detail="not found")
+        try:
+            proxied = await registry.proxy(
+                session,
+                request.method,
+                upstream_path,
+                request.scope.get("query_string", b"").decode("latin-1"),
+                request.headers,
+                await request.body(),
+            )
+        except ModelProxyError as exc:
+            return JSONResponse(
+                status_code=exc.status_code,
+                content={
+                    "type": "error",
+                    "error": {
+                        "type": exc.code,
+                        "message": str(exc),
+                    },
+                },
+            )
+        if proxied.body_iterator is not None:
+            return StreamingResponse(
+                proxied.body_iterator,
+                status_code=proxied.status_code,
+                headers=proxied.headers,
+            )
+        return Response(
+            content=proxied.content or b"",
+            status_code=proxied.status_code,
+            headers=proxied.headers,
         )
 
     @app.api_route(

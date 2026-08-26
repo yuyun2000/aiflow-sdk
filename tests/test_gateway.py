@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import sqlite3
 import threading
 import time
@@ -11,7 +12,13 @@ from fastapi.testclient import TestClient
 from aiflow_server.agent import AgentRunResult
 from aiflow_server.app import TOKEN_HEADER
 from aiflow_server.config import load_settings
-from aiflow_server.gateway import GatewayRateLimiter, WEB_SESSION_COOKIE, create_gateway_app
+from aiflow_server.gateway import (
+    WEB_SESSION_COOKIE,
+    GatewayRateLimiter,
+    _ModelProxyAccessLogFilter,
+    create_gateway_app,
+)
+from aiflow_server.model_proxy import ModelProxyResponse
 from aiflow_server.security import SIGNATURE_HEADER
 
 
@@ -216,3 +223,84 @@ def test_slow_ai_quota_storage_does_not_block_event_loop(tmp_path):
     assert elapsed < 0.2
     assert limited.status_code == 429
     assert limited.json()["detail"]["code"] == "web_rate_limit_ai_session_minute"
+
+
+def test_model_proxy_access_log_filter_redacts_capability_token():
+    record = logging.LogRecord(
+        "uvicorn.access",
+        logging.INFO,
+        __file__,
+        1,
+        '%s - "%s %s HTTP/%s" %d',
+        (
+            "127.0.0.1:12345",
+            "POST",
+            "/.aiflow-internal/model/secret-capability/provider/v1/messages",
+            "1.1",
+            200,
+        ),
+        None,
+    )
+
+    assert _ModelProxyAccessLogFilter().filter(record) is True
+    assert "secret-capability" not in record.getMessage()
+    assert "/.aiflow-internal/model/[redacted]/provider/v1/messages" in record.getMessage()
+
+
+def test_internal_model_proxy_route_is_loopback_only_and_skips_web_cookie(tmp_path):
+    base = load_settings()
+    settings = replace(
+        base,
+        data_dir=tmp_path / "data",
+        ai_quota=replace(base.ai_quota, enabled=False),
+    )
+    app = create_gateway_app(settings, runner=GatewayRunner())
+
+    class StubRegistry:
+        def __init__(self):
+            self.session = object()
+            self.calls = []
+
+        def get(self, token):
+            return self.session if token == "valid-capability" else None
+
+        async def proxy(self, session, method, path, query, headers, body):
+            self.calls.append((session, method, path, query, headers.get("x-api-key"), body))
+            return ModelProxyResponse(
+                200,
+                {"content-type": "application/json"},
+                content=b'{"ok":true}',
+            )
+
+        async def close(self):
+            return None
+
+    registry = StubRegistry()
+    app.state.core_tasks.model_proxy_registry = registry
+    with TestClient(app, client=("127.0.0.1", 50000)) as client:
+        response = client.post(
+            "/.aiflow-internal/model/valid-capability/provider/v1/messages?beta=true",
+            headers={"x-api-key": "fake-upstream-key"},
+            content=b'{"max_tokens":16}',
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True}
+    assert "set-cookie" not in response.headers
+    assert registry.calls == [
+        (
+            registry.session,
+            "POST",
+            "provider/v1/messages",
+            "beta=true",
+            "fake-upstream-key",
+            b'{"max_tokens":16}',
+        )
+    ]
+
+    blocked_app = create_gateway_app(settings, runner=GatewayRunner())
+    with TestClient(blocked_app, client=("203.0.113.9", 50000)) as client:
+        blocked = client.get(
+            "/.aiflow-internal/model/valid-capability/provider/v1/messages"
+        )
+    assert blocked.status_code == 404

@@ -50,6 +50,63 @@ def test_database_reconstructs_complete_turn_usage_content_and_tools(database) -
     assert event is not None and event["mac_address"] == "AA:BB:CC:DD:EE:FF"
 
 
+def test_synthetic_error_message_does_not_replace_or_stick_as_primary_model(database) -> None:
+    records = []
+    for sequence, event_type, payload in (
+        (
+            0,
+            "agent_connected",
+            {"runtime": {"model": "deepseek-v4-pro-ga-260813"}},
+        ),
+        (
+            1,
+            "assistant_message_finished",
+            {"model": "<synthetic>", "stop_reason": "stop_sequence"},
+        ),
+        (
+            2,
+            "agent_result_error",
+            {
+                "usage": {
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "cache_read_input_tokens": 0,
+                    "cache_creation_input_tokens": 0,
+                },
+                "model_usage": {},
+                "total_cost_usd": 0,
+                "terminal_reason": "api_error",
+            },
+        ),
+        (3, "task_failed", {"error": {"code": "quota_denied"}}),
+    ):
+        records.extend(
+            event_records(
+                turn_id="turn-synthetic-error",
+                sequence=sequence,
+                event_type=event_type,
+                payload=payload,
+            )
+        )
+    database.insert_logs(records)
+
+    turn = database.query_one(
+        "SELECT primary_model FROM turns WHERE turn_id='turn-synthetic-error'"
+    )
+    assert turn == {"primary_model": "deepseek-v4-pro-ga-260813"}
+
+    with database.connect() as connection:
+        connection.execute(
+            "UPDATE turns SET primary_model='<synthetic>' WHERE turn_id='turn-synthetic-error'"
+        )
+    database.initialize()
+
+    repaired = database.query_one(
+        "SELECT primary_model FROM turns WHERE turn_id='turn-synthetic-error'"
+    )
+    assert repaired == {"primary_model": "deepseek-v4-pro-ga-260813"}
+
+
 def test_incomplete_chunks_wait_for_later_sync(database) -> None:
     records = event_records(
         turn_id="turn-partial",

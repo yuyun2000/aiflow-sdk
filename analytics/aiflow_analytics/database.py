@@ -232,6 +232,10 @@ def _float_value(data: dict[str, Any], *keys: str) -> float | None:
     return None
 
 
+def _is_synthetic_model(value: Any) -> bool:
+    return str(value or "").strip().lower() == "<synthetic>"
+
+
 class Database:
     def __init__(self, path: Path, schema_version: int) -> None:
         self.path = path
@@ -296,6 +300,11 @@ class Database:
                     + cache_read_input_tokens + cache_creation_input_tokens
                 """
             )
+            synthetic_turns = connection.execute(
+                "SELECT turn_id FROM turns WHERE LOWER(TRIM(primary_model))='<synthetic>'"
+            ).fetchall()
+            for row in synthetic_turns:
+                self._rebuild_turn(connection, str(row["turn_id"]))
 
     @staticmethod
     def _table_columns(connection: sqlite3.Connection, table: str) -> set[str]:
@@ -636,7 +645,9 @@ class Database:
                     assistant_chars += len(str(payload.get("text") or ""))
             elif event_type == "assistant_message_finished":
                 if not payload.get("parent_tool_use_id"):
-                    primary_model = str(payload.get("model") or primary_model)
+                    message_model = str(payload.get("model") or "")
+                    if message_model and not _is_synthetic_model(message_model):
+                        primary_model = message_model
                 stop_reason = str(payload.get("stop_reason") or stop_reason)
             elif event_type in {"tool_started", "server_tool_started"}:
                 tool_type = "server" if event_type.startswith("server_") else "client"

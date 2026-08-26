@@ -285,6 +285,7 @@ def create_app(
                 "sauc_nostream_asr",
                 "sauc_nostream_asr_stream_upload",
                 "ai_free_token_quota",
+                "server_decision_per_model_request_ai_quota",
             ],
         }
 

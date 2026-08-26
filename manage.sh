@@ -314,7 +314,7 @@ print(
     "AI free-token quota: "
     f"{'enabled' if quota.enabled else 'disabled'} "
     f"(credentials={'configured' if quota.configured else 'missing'}, "
-    f"model={quota.model}, requested_tokens={quota.requested_tokens or 'server-default'})"
+    f"model={quota.model}, mode=server-decision-per-model-request)"
 )
 print("Public entrypoint: anonymous web BFF (aiflow_server.gateway)")
 print("Private core authentication: enabled with an in-memory BFF key")

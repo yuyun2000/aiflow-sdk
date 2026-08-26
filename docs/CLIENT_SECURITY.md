@@ -24,6 +24,10 @@ aiflow_server.gateway:app
 
 网关在同一进程中创建私有 `aiflow_server.app`，但不把核心路由绑定到独立公网端口。每次启动生成随机的 32 字节内部密钥，不落盘、不返回浏览器。浏览器提交的任何 `X-AIFlow-Client-*` 头都会被删除，网关重新计算请求体哈希、时间戳、nonce 和 HMAC 后调用核心。
 
+启用免费 Token 额度时，Claude Code 的模型出口还会指向同一网关上的内部代理。该路由只接受回环连接，并要求每个任务独立生成的高熵能力令牌；代理目标固定为服务启动环境中的 `ANTHROPIC_BASE_URL`，不能由请求选择，避免成为任意 URL 代理。令牌和内部 URL 不进入浏览器 API、TLS 对话事件或普通 Agent 错误，Uvicorn access log 会把该段路径替换为 `[redacted]`。反向代理仍应禁止外部显式访问 `/.aiflow-internal/`。
+
+内部代理在每个 `/messages` 请求前向 m5stack 额度服务询问是否放行，不发送 Token 预估或预占量，也不在本地比较余额、批准量和授权时长；只有额度服务返回 `allowed=true` 才会转发。工具执行不经过代理；任务最终汇总 usage 不参与扣费。每次模型响应的真实 usage 单独上报；结算未确认时保留 SQLite 记录供补偿，但不反过来使已成功的模型响应失败，也不阻断下一次请求重新授权。
+
 `GET /api/v3/capabilities` 对浏览器返回：
 
 ```json

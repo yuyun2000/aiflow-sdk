@@ -1,3 +1,3 @@
 """AIFlow isolated web-agent service."""
 
-__version__ = "3.5.0"
+__version__ = "3.7.0"

@@ -2,6 +2,7 @@
   "use strict";
 
   const TOKEN_KEY = "aiflow.analytics.apiToken";
+  const PANEL_ORDER_KEY = "aiflow.analytics.panelOrder";
   const REFRESH_MS = 30_000;
   const state = {
     token: sessionStorage.getItem(TOKEN_KEY) || "",
@@ -180,6 +181,7 @@
     setText("api-p95", millis(latency.api_p95));
     setText("queue-avg", millis(latency.queue_avg));
     setText("deploy-rate", percent(deployment.success_rate));
+    setText("deploy-rate-count", ` 当前周期 ${number(deployment.successes)} / ${number(deployment.attempts)}。`, "");
     setText("range-label", `${state.startDate} 至 ${state.endDate} · ${number(volume.turns)} 个任务`);
     renderPricing(overview);
     renderHealth(volume, data.breakdowns || {});
@@ -415,11 +417,11 @@
     canvas.height = height * ratio;
     const ctx = canvas.getContext("2d");
     ctx.scale(ratio, ratio);
-    const padding = { top: 18, right: 20, bottom: 32, left: 40 };
+    const padding = { top: 18, right: 54, bottom: 32, left: 42 };
     const chartWidth = width - padding.left - padding.right;
     const chartHeight = height - padding.top - padding.bottom;
-    const values = points.flatMap((point) => [Number(point.turns || 0), Number(point.tokens || 0) / 1000, Number(point.tool_calls || 0)]);
-    const maxValue = Math.max(...values, 1);
+    const countMax = Math.max(...points.flatMap((point) => [Number(point.turns || 0), Number(point.tool_calls || 0)]), 1);
+    const tokenMax = Math.max(...points.map((point) => Number(point.tokens || 0)), 1);
     ctx.clearRect(0, 0, width, height);
     ctx.font = "10px -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif";
     ctx.strokeStyle = "#e6ecef";
@@ -428,29 +430,116 @@
     for (let index = 0; index <= 4; index += 1) {
       const y = padding.top + chartHeight * (index / 4);
       ctx.beginPath(); ctx.moveTo(padding.left, y); ctx.lineTo(width - padding.right, y); ctx.stroke();
-      ctx.fillText(number(maxValue * (1 - index / 4), 1), 6, y + 3);
+      const scale = 1 - index / 4;
+      ctx.fillStyle = "#087f76";
+      ctx.textAlign = "left";
+      ctx.fillText(number(countMax * scale, countMax < 10 ? 1 : 0), 6, y + 3);
+      ctx.fillStyle = "#3975a5";
+      ctx.textAlign = "right";
+      ctx.fillText(tokenNumber(tokenMax * scale), width - 6, y + 3);
     }
     const x = (index) => padding.left + (points.length === 1 ? chartWidth / 2 : chartWidth * index / (points.length - 1));
     points.forEach((point, index) => {
       if (points.length <= 8 || index % Math.ceil(points.length / 8) === 0 || index === points.length - 1) {
         const label = dateText(point.bucket).split(" ")[0];
-        ctx.fillStyle = "#7a8790"; ctx.fillText(label, x(index) - 16, height - 10);
+        ctx.fillStyle = "#7a8790"; ctx.textAlign = "center"; ctx.fillText(label, x(index), height - 10);
       }
     });
     [["turns", "#087f76"], ["tokens", "#3975a5"], ["tool_calls", "#c75d4e"]].forEach(([field, color]) => {
       ctx.beginPath();
       points.forEach((point, index) => {
-        const raw = field === "tokens" ? Number(point.tokens || 0) / 1000 : Number(point[field] || 0);
+        const raw = Number(point[field] || 0);
+        const maxValue = field === "tokens" ? tokenMax : countMax;
         const y = padding.top + chartHeight * (1 - raw / maxValue);
         if (index === 0) ctx.moveTo(x(index), y); else ctx.lineTo(x(index), y);
       });
       ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.stroke();
       points.forEach((point, index) => {
-        const raw = field === "tokens" ? Number(point.tokens || 0) / 1000 : Number(point[field] || 0);
+        const raw = Number(point[field] || 0);
+        const maxValue = field === "tokens" ? tokenMax : countMax;
         const y = padding.top + chartHeight * (1 - raw / maxValue);
         ctx.beginPath(); ctx.fillStyle = color; ctx.arc(x(index), y, 2.5, 0, Math.PI * 2); ctx.fill();
       });
     });
+  }
+
+  function panelOrder(container) {
+    return [...container.querySelectorAll(":scope > .sortable-panel")].map((panel) => panel.dataset.panelId);
+  }
+
+  function savePanelOrder(container) {
+    try { localStorage.setItem(PANEL_ORDER_KEY, JSON.stringify(panelOrder(container))); } catch (_) { /* storage may be disabled */ }
+  }
+
+  function restorePanelOrder(container) {
+    let saved = [];
+    try { saved = JSON.parse(localStorage.getItem(PANEL_ORDER_KEY) || "[]"); } catch (_) { /* ignore invalid local state */ }
+    if (!Array.isArray(saved)) return;
+    const panels = new Map([...container.querySelectorAll(":scope > .sortable-panel")].map((panel) => [panel.dataset.panelId, panel]));
+    const orderedIds = [...saved.filter((id) => panels.has(id)), ...[...panels.keys()].filter((id) => !saved.includes(id))];
+    orderedIds.forEach((id) => container.append(panels.get(id)));
+  }
+
+  function setupPanelSorting() {
+    const container = document.querySelector(".split-grid");
+    if (!container) return;
+    restorePanelOrder(container);
+    let pointer = null;
+
+    const movePointer = (event) => {
+      if (!pointer || pointer.id !== event.pointerId) return;
+      if (!pointer.active && Math.hypot(event.clientX - pointer.startX, event.clientY - pointer.startY) < 7) return;
+      event.preventDefault();
+      pointer.active = true;
+      pointer.panel.classList.add("dragging");
+      const previousPointerEvents = pointer.panel.style.pointerEvents;
+      pointer.panel.style.pointerEvents = "none";
+      const target = document.elementFromPoint(event.clientX, event.clientY)?.closest(".sortable-panel");
+      pointer.panel.style.pointerEvents = previousPointerEvents;
+      if (!target || target === pointer.panel || target.parentElement !== container) return;
+      const targetRect = target.getBoundingClientRect();
+      const draggedRect = pointer.panel.getBoundingClientRect();
+      const verticalOverlap = Math.max(0, Math.min(targetRect.bottom, draggedRect.bottom) - Math.max(targetRect.top, draggedRect.top));
+      const sameRow = verticalOverlap > Math.min(targetRect.height, draggedRect.height) / 2;
+      const before = sameRow
+        ? event.clientX < targetRect.left + targetRect.width / 2
+        : event.clientY < targetRect.top + targetRect.height / 2;
+      container.insertBefore(pointer.panel, before ? target : target.nextSibling);
+    };
+
+    const finishPointer = (event) => {
+      if (!pointer || pointer.id !== event.pointerId) return;
+      if (pointer.active) event.preventDefault();
+      pointer.panel.classList.remove("dragging");
+      if (pointer.active) savePanelOrder(container);
+      pointer = null;
+    };
+
+    container.querySelectorAll(".panel-drag-handle").forEach((handle) => {
+      const panel = handle.closest(".sortable-panel");
+      handle.addEventListener("pointerdown", (event) => {
+        if (event.pointerType === "mouse" && event.button !== 0) return;
+        event.preventDefault();
+        handle.focus();
+        pointer = { id: event.pointerId, panel, startX: event.clientX, startY: event.clientY, active: false };
+      });
+      handle.addEventListener("keydown", (event) => {
+        if (!["ArrowLeft", "ArrowUp", "ArrowRight", "ArrowDown"].includes(event.key)) return;
+        event.preventDefault();
+        const panels = [...container.querySelectorAll(":scope > .sortable-panel")];
+        const current = panels.indexOf(panel);
+        const delta = event.key === "ArrowLeft" || event.key === "ArrowUp" ? -1 : 1;
+        const next = Math.max(0, Math.min(panels.length - 1, current + delta));
+        if (next === current) return;
+        if (delta < 0) container.insertBefore(panel, panels[next]);
+        else container.insertBefore(panel, panels[next].nextSibling);
+        savePanelOrder(container);
+        handle.focus();
+      });
+    });
+    window.addEventListener("pointermove", movePointer, { passive: false });
+    window.addEventListener("pointerup", finishPointer, { passive: false });
+    window.addEventListener("pointercancel", finishPointer, { passive: false });
   }
 
   function renderActivity(data) {
@@ -732,6 +821,7 @@
 
   function bindEvents() {
     setDateRange(7);
+    setupPanelSorting();
     document.querySelectorAll("#range-presets button").forEach((button) => button.addEventListener("click", () => { setDateRange(Number(button.dataset.days)); state.page = 1; state.devicePage = 1; loadData(); }));
     $("start-date").addEventListener("change", () => { setCustomDateRange(); state.page = 1; state.devicePage = 1; loadData(); });
     $("end-date").addEventListener("change", () => { setCustomDateRange(); state.page = 1; state.devicePage = 1; loadData(); });

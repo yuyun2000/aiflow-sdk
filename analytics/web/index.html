@@ -7,7 +7,7 @@
   <meta name="description" content="AIFlow 对话日志实时监控台">
   <title>AIFlow 对话日志监控</title>
   <link rel="icon" href="data:,">
-  <link rel="stylesheet" href="/assets/app.css?v=20260824-mac-stats">
+  <link rel="stylesheet" href="/assets/app.css?v=20260826-dashboard-layout">
 </head>
 <body>
   <header class="app-header">
@@ -75,36 +75,46 @@
           <div><h2>使用趋势</h2><p>任务量、Token 和工具调用按时间聚合</p></div>
           <label class="select-label">粒度<select id="bucket-select"><option value="day">按天</option><option value="hour">按小时</option><option value="week">按周</option></select></label>
         </div>
-        <div class="chart-legend"><span><i class="legend-key key-teal"></i>任务数</span><span><i class="legend-key key-blue"></i>Token（千）</span><span><i class="legend-key key-coral"></i>工具调用</span></div>
+        <div class="chart-legend"><span><i class="legend-key key-teal"></i>任务数（左轴）</span><span><i class="legend-key key-coral"></i>工具调用（左轴）</span><span><i class="legend-key key-blue"></i>Token（右轴）</span></div>
         <div class="chart-wrap"><canvas id="trend-chart" aria-label="使用趋势图"></canvas><div class="chart-empty" id="trend-empty" hidden>当前范围暂无数据</div></div>
       </article>
       <article class="panel health-panel">
         <div class="panel-heading"><div><h2>服务健康</h2><p>数据链路和任务终态</p></div><span class="live-mark"><i></i>LIVE</span></div>
         <div class="health-ring-wrap"><div class="health-ring" id="health-ring"><strong id="health-ring-value">--</strong><span>完成率</span></div><div class="health-legend" id="health-legend"></div></div>
-        <div class="health-stats"><div><span>API P95</span><strong id="api-p95">--</strong></div><div><span>队列平均</span><strong id="queue-avg">--</strong></div><div><span>部署成功率</span><strong id="deploy-rate">--</strong></div></div>
+        <div class="health-stats">
+          <div>
+            <span class="metric-label">模型 API P95<span class="info-tip"><button class="info-button" type="button" aria-label="模型 API P95 统计口径" aria-describedby="api-p95-help">?</button><span class="info-popover" id="api-p95-help" role="tooltip">周期内 Claude Agent SDK 上报的 duration_api_ms 第 95 百分位：95% 的任务不超过此耗时。它不是后台 HTTP 接口延迟。</span></span></span>
+            <strong id="api-p95">--</strong>
+          </div>
+          <div><span>队列平均</span><strong id="queue-avg">--</strong></div>
+          <div>
+            <span class="metric-label">部署成功率<span class="info-tip"><button class="info-button" type="button" aria-label="部署成功率统计口径" aria-describedby="deploy-rate-help">?</button><span class="info-popover align-right" id="deploy-rate-help" role="tooltip">部署成功任务数 / 有部署尝试的任务数。出现 deployment_started 或 deployment_finished 计为尝试，仅 deployment_finished 返回成功才计为成功。<span id="deploy-rate-count"></span></span></span></span>
+            <strong id="deploy-rate">--</strong>
+          </div>
+        </div>
       </article>
     </section>
 
     <section class="dashboard-grid split-grid">
-      <article class="panel">
-        <div class="panel-heading"><div><h2>模型用量</h2><p>含缓存 Token、缓存命中率、成本和任务分布</p></div></div>
+      <article class="panel sortable-panel" data-panel-id="models">
+        <div class="panel-heading"><div><h2>模型用量</h2><p>含缓存 Token、缓存命中率、成本和任务分布</p></div><button class="panel-drag-handle" type="button" aria-label="拖动模型用量模块；方向键可调整顺序" title="拖动排序，或用方向键调整">&#8942;&#8942;</button></div>
         <div class="bar-list" id="models-list"></div>
       </article>
-      <article class="panel pricing-panel">
-        <div class="panel-heading"><div><h2>费用与计费</h2><p>实际花费按 model_pricing.json 的模型单价计算，SDK 价格仅作参考</p></div><span id="pricing-badge" class="small-badge">读取中</span></div>
+      <article class="panel pricing-panel sortable-panel" data-panel-id="pricing">
+        <div class="panel-heading"><div><h2>费用与计费</h2><p>实际花费按 model_pricing.json 的模型单价计算，SDK 价格仅作参考</p></div><div class="panel-heading-actions"><span id="pricing-badge" class="small-badge">读取中</span><button class="panel-drag-handle" type="button" aria-label="拖动费用与计费模块；方向键可调整顺序" title="拖动排序，或用方向键调整">&#8942;&#8942;</button></div></div>
         <div class="pricing-list" id="pricing-list"></div>
         <div class="pricing-actual"><span>实际花费（按模型价格）</span><strong id="actual-cost">--</strong><small id="actual-cost-note">来源：model_pricing.json</small></div>
       </article>
-      <article class="panel">
-        <div class="panel-heading"><div><h2>工具调用</h2><p>完成、错误和平均耗时</p></div></div>
+      <article class="panel sortable-panel" data-panel-id="tools">
+        <div class="panel-heading"><div><h2>工具调用</h2><p>完成、错误和平均耗时</p></div><button class="panel-drag-handle" type="button" aria-label="拖动工具调用模块；方向键可调整顺序" title="拖动排序，或用方向键调整">&#8942;&#8942;</button></div>
         <div class="bar-list" id="tools-list"></div>
       </article>
-      <article class="panel">
-        <div class="panel-heading"><div><h2>任务状态</h2><p>当前筛选范围内的终态分布</p></div></div>
+      <article class="panel sortable-panel" data-panel-id="statuses">
+        <div class="panel-heading"><div><h2>任务状态</h2><p>当前筛选范围内的终态分布</p></div><button class="panel-drag-handle" type="button" aria-label="拖动任务状态模块；方向键可调整顺序" title="拖动排序，或用方向键调整">&#8942;&#8942;</button></div>
         <div class="bar-list" id="statuses-list"></div>
       </article>
-      <article class="panel quality-panel">
-        <div class="panel-heading"><div><h2>数据质量</h2><p>同步和重建链路的完整度</p></div><span id="quality-badge" class="small-badge">检查中</span></div>
+      <article class="panel quality-panel sortable-panel" data-panel-id="quality">
+        <div class="panel-heading"><div><h2>数据质量</h2><p>同步和重建链路的完整度</p></div><div class="panel-heading-actions"><span id="quality-badge" class="small-badge">检查中</span><button class="panel-drag-handle" type="button" aria-label="拖动数据质量模块；方向键可调整顺序" title="拖动排序，或用方向键调整">&#8942;&#8942;</button></div></div>
         <div class="quality-list" id="quality-list"></div>
       </article>
     </section>
@@ -142,6 +152,6 @@
   <div class="drawer-backdrop" id="drawer-backdrop" hidden></div>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-  <script src="/assets/app.js?v=20260824-mac-stats"></script>
+  <script src="/assets/app.js?v=20260826-dashboard-layout"></script>
 </body>
 </html>

@@ -69,6 +69,35 @@ _UNKNOWN_MODEL_NAMES = {
     "<unknown>",
 }
 
+_SYNTHETIC_MODEL_NAME = "<synthetic>"
+_TOKEN_USAGE_FIELDS = (
+    "input_tokens",
+    "output_tokens",
+    "cache_read_input_tokens",
+    "cache_creation_input_tokens",
+)
+_MODEL_USAGE_ACTIVITY_FIELDS = (
+    *_TOKEN_USAGE_FIELDS,
+    "web_search_requests",
+)
+
+
+def _is_zero_synthetic_model_usage(row: dict[str, Any]) -> bool:
+    model = _model_name(row).lower()
+    if model != _SYNTHETIC_MODEL_NAME:
+        return False
+    has_usage = any(int(row.get(field) or 0) for field in _MODEL_USAGE_ACTIVITY_FIELDS)
+    has_cost = float(row.get("cost_usd") or 0) != 0
+    return not has_usage and not has_cost
+
+
+def _has_token_usage(rows: list[dict[str, Any]]) -> bool:
+    return any(
+        int(row.get(field) or 0)
+        for row in rows
+        for field in _TOKEN_USAGE_FIELDS
+    )
+
 
 def _model_name(row: dict[str, Any]) -> str:
     for field in ("model", "primary_model", "canonical_model"):
@@ -134,6 +163,9 @@ class Analytics:
         model_rows: list[dict[str, Any]],
         fallback_rows: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
+        model_rows = [
+            row for row in model_rows if not _is_zero_synthetic_model_usage(row)
+        ]
         if model_rows:
             covered_turn_ids = {
                 str(row["turn_id"])
@@ -165,15 +197,11 @@ class Analytics:
             ]
         grouped: dict[str, dict[str, int]] = {}
         for row in model_rows:
+            if _is_zero_synthetic_model_usage(row):
+                continue
             model = _model_name(row)
-            token_fields = (
-                "input_tokens",
-                "output_tokens",
-                "cache_read_input_tokens",
-                "cache_creation_input_tokens",
-            )
             if model == "unknown" and not any(
-                int(row.get(field) or 0) for field in token_fields
+                int(row.get(field) or 0) for field in _TOKEN_USAGE_FIELDS
             ):
                 # Incomplete historical turns can have no model and no usage.
                 # They must not create a fake unpriced model or block totals.
@@ -235,7 +263,8 @@ class Analytics:
             SELECT m.model, m.canonical_model, t.primary_model,
                    m.turn_id,
                    m.input_tokens, m.output_tokens,
-                   m.cache_read_input_tokens, m.cache_creation_input_tokens
+                   m.cache_read_input_tokens, m.cache_creation_input_tokens,
+                   m.web_search_requests, m.cost_usd
             FROM turn_model_usage m
             JOIN turns t ON t.turn_id=m.turn_id
             WHERE t.input_time_ms>=? AND t.input_time_ms<?
@@ -251,7 +280,10 @@ class Analytics:
         sdk_reported_usd: float | None,
     ) -> dict[str, Any]:
         estimates = self._model_estimates_from_rows(model_rows, fallback_rows)
-        complete = bool(estimates) and all(item["configured"] for item in estimates)
+        zero_usage = bool(fallback_rows) and not _has_token_usage(fallback_rows)
+        complete = (bool(estimates) and all(item["configured"] for item in estimates)) or (
+            not estimates and zero_usage
+        )
         configured_cost = (
             round(sum(item["estimated_usd"] or 0 for item in estimates), 6)
             if complete
@@ -268,7 +300,8 @@ class Analytics:
             """
             SELECT m.model, m.canonical_model, m.turn_id, t.primary_model,
                    m.input_tokens, m.output_tokens,
-                   m.cache_read_input_tokens, m.cache_creation_input_tokens
+                   m.cache_read_input_tokens, m.cache_creation_input_tokens,
+                   m.web_search_requests, m.cost_usd
             FROM turn_model_usage m
             JOIN turns t ON t.turn_id=m.turn_id
             WHERE m.turn_id=?
@@ -317,7 +350,8 @@ class Analytics:
             """
             SELECT m.model, m.canonical_model, m.turn_id, t.primary_model,
                    m.input_tokens, m.output_tokens,
-                   m.cache_read_input_tokens, m.cache_creation_input_tokens
+                   m.cache_read_input_tokens, m.cache_creation_input_tokens,
+                   m.web_search_requests, m.cost_usd
             FROM turn_model_usage m
             JOIN turns t ON t.turn_id=m.turn_id
             WHERE t.input_time_ms>=? AND t.input_time_ms<?
@@ -347,7 +381,8 @@ class Analytics:
             """
             SELECT m.model, m.canonical_model, m.turn_id, t.primary_model,
                    m.input_tokens, m.output_tokens,
-                   m.cache_read_input_tokens, m.cache_creation_input_tokens
+                   m.cache_read_input_tokens, m.cache_creation_input_tokens,
+                   m.web_search_requests, m.cost_usd
             FROM turn_model_usage m
             JOIN turns t ON t.turn_id=m.turn_id
             WHERE t.input_time_ms>=? AND t.input_time_ms<?
@@ -424,9 +459,9 @@ class Analytics:
             value for value in estimated_breakdown.values() if value is not None
         ]
         estimated_total = round(sum(estimated_values), 6) if estimated_values else None
-        pricing_complete = bool(model_estimates) and all(
-            item["configured"] for item in model_estimates
-        )
+        pricing_complete = (
+            bool(model_estimates) and all(item["configured"] for item in model_estimates)
+        ) or (not model_estimates and bool(rows) and total_tokens == 0)
         configured_actual_cost = (
             round(sum(item["estimated_usd"] or 0 for item in model_estimates), 6)
             if pricing_complete
@@ -678,10 +713,12 @@ class Analytics:
             WHERE t.input_time_ms>=? AND t.input_time_ms<?
             GROUP BY m.model, m.provider, m.canonical_model
             ORDER BY cost_usd DESC, output_tokens DESC
-            LIMIT ?
             """,
-            (*params, limit),
+            params,
         )
+        models = [
+            model for model in models if not _is_zero_synthetic_model_usage(model)
+        ][:limit]
         for model in models:
             model.update(_token_usage_fields(model))
             prices = self._pricing_for_model(str(model["model"]))
@@ -1116,6 +1153,9 @@ class Analytics:
             "SELECT * FROM turn_model_usage WHERE turn_id=? ORDER BY cost_usd DESC, model",
             (turn_id,),
         )
+        models = [
+            model for model in models if not _is_zero_synthetic_model_usage(model)
+        ]
         turn.update(self._turn_cost_fields(turn))
         for model in models:
             model.update(_token_usage_fields(model))

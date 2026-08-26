@@ -82,6 +82,10 @@ def test_complex_metrics_trends_comparison_and_breakdowns(database) -> None:
     assert overview["cost"]["actual_per_conversation_usd"] == 0.001893
     assert overview["tools"]["errors"] == 1
     assert overview["latency_ms"]["agent_p95"] == 9000
+    assert overview["latency_ms"]["api_p95"] == 7000
+    assert overview["deployment"]["attempts"] == 2
+    assert overview["deployment"]["successes"] == 2
+    assert overview["deployment"]["success_rate"] == 1.0
 
     comparison = analytics.compare(period)
     assert comparison["previous"]["volume"]["turns"] == 1
@@ -288,6 +292,179 @@ def test_empty_unknown_turn_does_not_block_configured_cost(database) -> None:
         == "deepseek-v4-flash-ga-260731"
     )
     assert summary["cost"]["actual_usd"] == 0.000193
+
+
+def test_zero_synthetic_usage_is_retained_but_excluded_from_metrics(database) -> None:
+    database.insert_logs(
+        complete_turn(
+            "turn-with-synthetic",
+            model="deepseek-v4-flash-ga-260731",
+            cost_usd=0.2,
+            mac_address="AA:BB:CC:DD:EE:FF",
+        )
+    )
+    with database.connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO turn_model_usage(
+                turn_id, model, input_tokens, output_tokens,
+                cache_read_input_tokens, cache_creation_input_tokens,
+                web_search_requests, cost_usd, context_window,
+                max_output_tokens, provider, canonical_model
+            ) VALUES (?, ?, 0, 0, 0, 0, 0, 0, NULL, NULL, ?, ?)
+            """,
+            ("turn-with-synthetic", "<synthetic>", "", ""),
+        )
+    analytics = Analytics(
+        database,
+        "Asia/Shanghai",
+        model_pricing={
+            "deepseek-v4-flash-ga-260731": {
+                "input": 1.0,
+                "output": 2.0,
+                "cache_read": 0.1,
+                "cache_creation": 1.0,
+            }
+        },
+    )
+    period = Period(BASE_TIME_MS, BASE_TIME_MS + DAY_MS)
+
+    summary = analytics.overview(period)
+    assert summary["cost"]["pricing_complete"] is True
+    assert summary["cost"]["actual_usd"] == 0.000193
+    assert [item["model"] for item in summary["cost"]["model_estimates"]] == [
+        "deepseek-v4-flash-ga-260731"
+    ]
+    assert [item["model"] for item in analytics.breakdowns(period)["models"]] == [
+        "deepseek-v4-flash-ga-260731"
+    ]
+    assert analytics.turns(period)["items"][0]["configured_actual_usd"] == 0.000193
+    assert (
+        analytics.conversations(period)["items"][0]["configured_actual_usd"]
+        == 0.000193
+    )
+    assert analytics.devices(period)["items"][0]["configured_actual_usd"] == 0.000193
+    detail = analytics.turn_detail("turn-with-synthetic")
+    assert detail is not None
+    assert [item["model"] for item in detail["models"]] == [
+        "deepseek-v4-flash-ga-260731"
+    ]
+    assert database.query_one(
+        "SELECT COUNT(*) AS count FROM turn_model_usage WHERE model='<synthetic>'"
+    ) == {"count": 1}
+
+
+def test_nonzero_synthetic_usage_remains_visible_and_unpriced(database) -> None:
+    database.insert_logs(
+        complete_turn(
+            "turn-with-billable-synthetic",
+            model="deepseek-v4-flash-ga-260731",
+        )
+    )
+    with database.connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO turn_model_usage(
+                turn_id, model, input_tokens, output_tokens,
+                cache_read_input_tokens, cache_creation_input_tokens,
+                web_search_requests, cost_usd, context_window,
+                max_output_tokens, provider, canonical_model
+            ) VALUES (?, ?, 1, 0, 0, 0, 0, 0, NULL, NULL, ?, ?)
+            """,
+            ("turn-with-billable-synthetic", "<synthetic>", "", ""),
+        )
+    analytics = Analytics(
+        database,
+        "Asia/Shanghai",
+        model_pricing={
+            "deepseek-v4-flash-ga-260731": {
+                "input": 1.0,
+                "output": 2.0,
+                "cache_read": 0.1,
+                "cache_creation": 1.0,
+            }
+        },
+    )
+    period = Period(BASE_TIME_MS, BASE_TIME_MS + DAY_MS)
+
+    summary = analytics.overview(period)
+    assert summary["cost"]["pricing_complete"] is False
+    assert summary["cost"]["actual_usd"] is None
+    assert {item["model"] for item in summary["cost"]["model_estimates"]} == {
+        "deepseek-v4-flash-ga-260731",
+        "<synthetic>",
+    }
+    assert {item["model"] for item in analytics.breakdowns(period)["models"]} == {
+        "deepseek-v4-flash-ga-260731",
+        "<synthetic>",
+    }
+
+
+def test_zero_usage_synthetic_fallback_does_not_block_costs(database) -> None:
+    database.insert_logs(
+        complete_turn(
+            "turn-priced-before-zero",
+            model="deepseek-v4-flash-ga-260731",
+            cost_usd=0.2,
+            mac_address="AA:BB:CC:DD:EE:FF",
+        )
+    )
+    database.insert_logs(
+        complete_turn(
+            "turn-zero-synthetic-fallback",
+            base_time_ms=BASE_TIME_MS + 60_000,
+            conversation_id="conversation-zero-synthetic",
+            model="deepseek-v4-flash-ga-260731",
+            cost_usd=0,
+            mac_address="AA:BB:CC:DD:EE:FF",
+        )
+    )
+    with database.connect() as connection:
+        connection.execute(
+            "DELETE FROM turn_model_usage WHERE turn_id=?",
+            ("turn-zero-synthetic-fallback",),
+        )
+        connection.execute(
+            """
+            UPDATE turns
+            SET primary_model='<synthetic>', input_tokens=0, output_tokens=0,
+                cache_read_input_tokens=0, cache_creation_input_tokens=0,
+                total_tokens=0, total_cost_usd=0
+            WHERE turn_id=?
+            """,
+            ("turn-zero-synthetic-fallback",),
+        )
+    analytics = Analytics(
+        database,
+        "Asia/Shanghai",
+        model_pricing={
+            "deepseek-v4-flash-ga-260731": {
+                "input": 1.0,
+                "output": 2.0,
+                "cache_read": 0.1,
+                "cache_creation": 1.0,
+            }
+        },
+    )
+    period = Period(BASE_TIME_MS, BASE_TIME_MS + DAY_MS)
+
+    summary = analytics.overview(period)
+    assert summary["cost"]["pricing_complete"] is True
+    assert summary["cost"]["actual_usd"] == 0.000193
+    assert summary["cost"]["unpriced_models"] == []
+    assert [item["model"] for item in analytics.breakdowns(period)["models"]] == [
+        "deepseek-v4-flash-ga-260731"
+    ]
+    zero_turn = analytics.turn_detail("turn-zero-synthetic-fallback")
+    assert zero_turn is not None
+    assert zero_turn["turn"]["configured_actual_usd"] == 0.0
+    assert zero_turn["turn"]["pricing_complete"] is True
+    assert zero_turn["models"] == []
+    assert analytics.devices(period)["items"][0]["configured_actual_usd"] == 0.000193
+    conversations = {
+        item["conversation_id"]: item for item in analytics.conversations(period)["items"]
+    }
+    assert conversations["conversation-zero-synthetic"]["configured_actual_usd"] == 0.0
 
 
 def test_period_labels_use_configured_timezone(database) -> None:

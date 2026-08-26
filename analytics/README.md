@@ -24,11 +24,11 @@
 - 整体及逐模型缓存命中率；分母为未缓存输入、缓存读取和缓存写入之和。
 - 输入、输出、缓存读取/写入 token 数，以及按配置单价估算的分类费用。
 - SDK Claude 计价参考、按模型价格计算的实际总费用、平均单任务/单会话费用、成功任务费用、每千 token 费用。
-- Agent/API/排队/服务总耗时的平均值、P50、P95。
+- Agent/模型 API/排队/服务总耗时的平均值、P50、P95；模型 API 耗时取 SDK `duration_api_ms`，不是后台 HTTP 响应延迟。
 - thinking/回复块和字符量、thinking/output 比、partial 数量。
 - 工具调用、结果、错误率、平均/P95 耗时、孤立调用与结果。
 - 模型级 token、缓存、Web Search、成本、provider、canonical model。
-- 文件与部署次数、部署成功率。
+- 文件与部署次数、部署成功率；成功率分母只包含出现 `deployment_started` 或 `deployment_finished` 的部署尝试任务。
 - 当前周期与等长上一周期的 delta、变化率，以及小时/日/周趋势。
 - conversation 多轮深度、成本、token、工具与内容量。
 - 分块缺失、解析错误、缺终态、缺 ResultMessage、partial、物理重复等质量指标。
@@ -57,6 +57,11 @@
 - `duration_ms` 是 SDK 报告的 Agent 总耗时，`duration_api_ms` 是其中的模型 API 耗时。
 - `turn_model_usage` 保存 `ResultMessage.model_usage` 的逐模型 token、成本、provider、
   canonical model 和 Web Search 次数。
+- Claude Code 可能为中断或本地合成消息写入 `<synthetic>` 模型行。四类 Token、Web Search
+  次数和费用全部为零时，分析服务保留数据库原始行，但不把它计入模型分解、缓存命中率或
+  价格完整性判断；纯零用量任务按已知 `$0.00` 处理。Synthetic 错误回复不会覆盖运行时
+  主模型，旧库中已经派生出的 synthetic 主模型会在启动时从事件重建。任何非零 synthetic
+  用量仍作为未配置模型展示，避免静默漏算。
 - `queue_duration_ms` 由 `user_input -> task_started` 计算，`service_duration_ms` 由
   `user_input -> task_completed/task_failed/task_cancelled` 计算，工具耗时按同一个
   `tool_use_id` 的开始和结束时间计算。
@@ -132,6 +137,7 @@ http://<服务器地址>:5090/
 页面会自动每 30 秒刷新，也可以手动刷新或提交选定日期范围的后台 TLS 同步。首次打开时在登录框输入
 `AIFLOW_ANALYTICS_API_TOKEN` 对应的 Bearer Token；令牌只保存在当前浏览器的 `sessionStorage`，关闭浏览器后不会保留。
 页面展示任务、设备、平均会话深度、完成率、含缓存总 Token、整体及逐模型缓存命中率、分类计费估算、实际总费用、平均任务/会话费用、SDK Claude 计价参考、耗时、工具错误率、趋势、模型/工具分布和数据质量。
+趋势图将任务数和工具调用放在左轴、Token 放在右轴，避免量级差异压平低数值曲线。模型、费用、工具、任务状态和数据质量模块可通过标题栏把手拖动排序，也可聚焦把手后使用方向键调整；顺序只保存在当前浏览器的 `localStorage`。模型 API P95 和部署成功率旁的问号会显示统计口径及当前周期部署成功数/尝试数。
 设备统计独立分页，只统计当前周期内 `mac_address` 非空的任务，并展示每台设备的会话、任务、Token、缓存、费用和最近活动。
 最近活动按项目和会话分组，会话内任务按时间正序排列并直接突出用户消息。点击任务后，用户消息保持展开，模型 thinking、回复、工具、结果和模型用量默认折叠；日志内容按纯文本展示，不会作为 HTML 执行。
 
