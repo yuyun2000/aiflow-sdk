@@ -1261,6 +1261,10 @@ class Analytics:
             "notes": {
                 "event_sequence_gaps": "expected because streaming-only events are not uploaded",
                 "physical_duplicates": "TLS is at-least-once; record_id is the idempotency key",
+                "duplicate_fetches": (
+                    "cumulative records skipped by completed sync runs; "
+                    "not restricted to the requested analytics period"
+                ),
             },
         }
 

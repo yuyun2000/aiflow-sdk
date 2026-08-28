@@ -338,7 +338,7 @@ Transfer-Encoding: chunked
 
 `format` 必须为 `pcm`；默认 `16000 Hz / 16 bit / mono`。服务端向 SAUC 声明 `pcm` 并发送裸 PCM 帧。客户端应在停止录音后结束 HTTP body，服务端再发送 SAUC 的负序号最终帧并等待整句结果。该接口仍返回同样的 JSON 结果，不提供上游增量文本 SSE。若前面使用 Nginx/Caddy，需关闭该路由的请求体缓冲，否则代理可能先收完整音频再转发。
 
-Agent 仅处理 M5Stack UIFlow2/MicroPython 编程任务。编写或确认 UIFlow2 代码时优先建议使用 `uiflow2-coder`，但服务端不强制工具调用顺序；需要产品规格、屏幕、按键、引脚、电气特性、兼容性或排障依据时，可以直接先使用 `m5stack-assistant` 查询官方 MCP。确认官方资料或工具存在重大问题时，Agent 按 Skill 规则提交 `knowledge_feedback`，并以返回的 `feedback_id` 作为成功依据。
+Agent 仅处理 M5Stack UIFlow2/MicroPython 编程任务。编写或确认 UIFlow2 代码时优先建议使用 `uiflow2-coder`；涉及界面布局、视觉层级、图形、仪表盘、动效或 UI 优化时使用 `uiflow2-ui-designer`，并在需要 API/硬件事实时与 `uiflow2-coder` 配合。服务端不强制工具调用顺序；需要产品规格、屏幕、按键、引脚、电气特性、兼容性或排障依据时，可以直接先使用 `m5stack-assistant` 查询官方 MCP。确认官方资料或工具存在重大问题时，Agent 按 Skill 规则提交 `knowledge_feedback`，并以返回的 `feedback_id` 作为成功依据。
 
 `deploy_mode`：
 

@@ -12,18 +12,20 @@
 - A basic UI widget library providing labels, image displays, and other UI controls.
 - Built on top of M5GFX.
 - Suitable for simple interactive UI elements.
+- **Recommendation**: For new interactive UI projects, prefer M5UI/LVGL. Use M5.Widgets for simple or legacy UI components.
 
 #### 3. M5UI
 
 - A high-level UI framework based on LVGL.
 - Provides page management, multi-widget layouts, and unified event handling.
+- **Recommendation**: Prefer M5UI/LVGL for new interactive UI projects.
 
 #### Usage Tips
 
 - ⚠️ Do not mix M5GFX, M5Widgets, and M5UI simultaneously, as it may cause rendering issues or event conflicts.
 - For graphics-only drawing → use M5GFX.
 - For simple interactive widgets → use M5Widgets.
-- For multi-page UI → use M5UI.
+- For multi-page UI → use M5UI/LVGL (recommended for new projects).
 
 Micropython Example:
 
@@ -77,5 +79,3 @@ if __name__ == "__main__":
         - `1`: Landscape (90°C)
         - `2`: Inverse Portrait (180°C)
         - `3`: Inverse Landscape (270°C)
-
-## Classes

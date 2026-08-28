@@ -204,6 +204,19 @@ def test_claude_context_and_turn_defaults_and_env_overrides(tmp_path, monkeypatc
     assert overridden.claude_max_turns == 40
 
 
+def test_default_claude_skills_include_ui_designer(tmp_path):
+    config = tmp_path / "server.json"
+    config.write_text("{}", encoding="utf-8")
+    settings = load_settings(config)
+
+    assert settings.enabled_skills == (
+        "uiflow2-coder",
+        "uiflow2-ui-designer",
+        "m5stack-assistant",
+        "aiflow-device-push",
+    )
+
+
 def test_claude_context_and_turn_reject_non_positive_values(tmp_path, monkeypatch):
     clear_auth_env(monkeypatch)
     config = tmp_path / "server.json"

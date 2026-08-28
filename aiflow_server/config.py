@@ -296,7 +296,12 @@ def load_settings(path: str | Path | None = None) -> Settings:
         raise ConfigError("server.cors_origins must be an array of strings")
 
     tools = _nested(data, "claude", "allowed_tools", ["Read", "Write", "Edit", "Glob", "Grep", "Bash"])
-    skills = _nested(data, "claude", "skills", ["uiflow2-coder", "m5stack-assistant", "aiflow-device-push"])
+    skills = _nested(
+        data,
+        "claude",
+        "skills",
+        ["uiflow2-coder", "uiflow2-ui-designer", "m5stack-assistant", "aiflow-device-push"],
+    )
     if not isinstance(tools, list) or not all(isinstance(item, str) for item in tools):
         raise ConfigError("claude.allowed_tools must be an array of strings")
     if not isinstance(skills, list) or not all(isinstance(item, str) for item in skills):

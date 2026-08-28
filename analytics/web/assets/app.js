@@ -385,7 +385,7 @@
       ["逻辑事件", records.logical_events], ["缺失分块", records.incomplete_events],
       ["缺失终态", turns.missing_terminal], ["Partial 任务", turns.partial_turns],
       ["工具缺少结果", tools.missing_results], ["孤立工具结果", tools.orphan_results],
-      ["导入错误", errors], ["重复拉取", records.duplicate_fetches],
+      ["导入错误", errors], ["累计重复物理读取", records.duplicate_fetches],
     ];
     const list = $("quality-list");
     list.replaceChildren();

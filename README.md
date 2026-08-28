@@ -184,7 +184,7 @@ TLS_PSEUDONYM_KEY="your-independent-random-secret"
     "permission_mode": "dontAsk",
     "sandbox_enabled": true,
     "allowed_tools": ["Read", "Write", "Edit", "Glob", "Grep", "Bash"],
-    "skills": ["uiflow2-coder", "m5stack-assistant", "aiflow-device-push"]
+    "skills": ["uiflow2-coder", "uiflow2-ui-designer", "m5stack-assistant", "aiflow-device-push"]
   }
 }
 ```
@@ -218,10 +218,11 @@ Claude Code SDK 会继承服务进程环境。当前服务显式用 `AIFLOW_CLAU
 每个有效 Coding 任务按以下原则执行：
 
 1. 编写或修改 UIFlow2 代码时优先建议使用 `uiflow2-coder` 查 Skill 自带的官方文档，但这不是工具调用顺序的硬限制；已有信息足够或任务不需要 UIFlow2 文档时可以跳过。
-2. 需要确认产品规格、屏幕、按键、引脚、电气特性、兼容性、固件/API 行为或排障依据时，可以直接使用 `m5stack-assistant` 查询官方 MCP，也允许它先于 `uiflow2-coder` 调用，避免无意义的前置查询。
-3. 官方资料缺失、冲突、明显错误、官方示例损坏或 MCP 工具异常，经复查后按 `m5stack-assistant` 要求调用 `knowledge_feedback`；只有返回 `feedback_id` 才算已提交。普通用户代码 bug 不会上报。
-4. Agent 写入 `main.py` 并做最小本地验证。存在未确认的关键硬件/API 信息时停止，不猜测、不推送。
-5. 只有 `deploy_mode=agent` 会向 Agent 暴露 `aiflow-device-push`、设备目标和推送网络；此时先执行一次 `plan`，再执行一次最终推送。`server` 由服务端在 Agent 结束后推送，`none` 完全不推送。
+2. 涉及界面布局、视觉层级、图形、仪表盘、动效或 UI 优化时，使用 `uiflow2-ui-designer`；涉及 UIFlow2 API 和硬件兼容性时，与 `uiflow2-coder` 配合。
+3. 需要确认产品规格、屏幕、按键、引脚、电气特性、兼容性、固件/API 行为或排障依据时，可以直接使用 `m5stack-assistant` 查询官方 MCP，也允许它先于 `uiflow2-coder` 调用，避免无意义的前置查询。
+4. 官方资料缺失、冲突、明显错误、官方示例损坏或 MCP 工具异常，经复查后按 `m5stack-assistant` 要求调用 `knowledge_feedback`；只有返回 `feedback_id` 才算已提交。普通用户代码 bug 不会上报。
+5. Agent 写入 `main.py` 并做最小本地验证。存在未确认的关键硬件/API 信息时停止，不猜测、不推送。
+6. 只有 `deploy_mode=agent` 会向 Agent 暴露 `aiflow-device-push`、设备目标和推送网络；此时先执行一次 `plan`，再执行一次最终推送。`server` 由服务端在 Agent 结束后推送，`none` 完全不推送。
 
 服务会在运行时自动把 `Skill` 加入基础工具集合，并精确放行 `m5stack-assistant` 使用的 `knowledge_search`、`knowledge_answer`、`knowledge_feedback`，无需在 `claude.allowed_tools` 中重复配置这些动态工具。
 

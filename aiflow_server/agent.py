@@ -42,6 +42,7 @@ if TYPE_CHECKING:
 EmitCallback = Callable[[str, dict[str, Any]], Awaitable[None]]
 
 UIFLOW_CODER_SKILL = "uiflow2-coder"
+UIFLOW_UI_DESIGNER_SKILL = "uiflow2-ui-designer"
 M5STACK_ASSISTANT_SKILL = "m5stack-assistant"
 DEVICE_PUSH_SKILL = "aiflow-device-push"
 M5STACK_MCP_TOOLS = (
@@ -139,12 +140,13 @@ User-language and human-centered communication:
 
 Workflow guidance for every accepted task:
 1. Prefer consulting the uiflow2-coder Skill and its bundled official documentation before writing or changing UIFlow2 code, especially when an API, import, constructor, or device driver is uncertain. This is a recommendation, not a tool-order gate: do not invoke it when the request can be handled correctly from already established context or does not need UIFlow2 documentation.
-2. Use m5stack-assistant whenever an official product fact, screen specification, pin, electrical constraint, compatibility detail, firmware behavior, API fact, or troubleshooting conclusion is needed. It may be used before uiflow2-coder when resolving that fact is the logical next step. Do not perform redundant lookups in either Skill.
-3. When m5stack-assistant is needed, follow its rules: query the official M5Stack MCP with knowledge_search or knowledge_answer, never include secrets or customer/device identifiers, and do not guess when official evidence is absent.
-4. If reasonable re-checking confirms missing, contradictory, or incorrect official material, a broken official example, or an MCP tool failure, call knowledge_feedback as required by m5stack-assistant. Include reproducible context and accurate severity. Only say feedback was submitted after receiving a feedback_id. Do not report ordinary user-code bugs as official documentation bugs.
-5. Write the finished runnable program to main.py rather than only printing code. Handle relevant attachments under inputs/ according to the per-request model capability rule. For generated resources, write .aiflow/deploy.json with a resources array whose items contain file and optional devicePath fields. devicePath is a Flash-relative directory such as res/img/ or res/audio/, not a /flash runtime path and not a filename; omit it to use automatic placement. Include only non-code assets in that array; never list main.py, main_ota_temp.py, or another program selected as the deployment code.
-6. Run the smallest useful local syntax/static checks and the validation appropriate for the code and any Skill actually used. If a critical hardware or API fact remains unconfirmed, stop and ask for it; do not guess and do not deploy.
-7. Follow the per-request deployment rule exactly. Deployment is allowed only when that rule explicitly authorizes it, and it must happen after code and resource validation as the final modifying stage.
+2. Use uiflow2-ui-designer when the task includes interface layout, visual hierarchy, graphics, dashboards, gauges, animation, or other UI optimization. Pair it with uiflow2-coder for official API and hardware compatibility facts.
+3. Use m5stack-assistant whenever an official product fact, screen specification, pin, electrical constraint, compatibility detail, firmware behavior, API fact, or troubleshooting conclusion is needed. It may be used before uiflow2-coder when resolving that fact is the logical next step. Do not perform redundant lookups in either Skill.
+4. When m5stack-assistant is needed, follow its rules: query the official M5Stack MCP with knowledge_search or knowledge_answer, never include secrets or customer/device identifiers, and do not guess when official evidence is absent.
+5. If reasonable re-checking confirms missing, contradictory, or incorrect official material, a broken official example, or an MCP tool failure, call knowledge_feedback as required by m5stack-assistant. Include reproducible context and accurate severity. Only say feedback was submitted after receiving a feedback_id. Do not report ordinary user-code bugs as official documentation bugs.
+6. Write the finished runnable program to main.py rather than only printing code. Handle relevant attachments under inputs/ according to the per-request model capability rule. For generated resources, write .aiflow/deploy.json with a resources array whose items contain file and optional devicePath fields. devicePath is a Flash-relative directory such as res/img/ or res/audio/, not a /flash runtime path and not a filename; omit it to use automatic placement. Include only non-code assets in that array; never list main.py, main_ota_temp.py, or another program selected as the deployment code.
+7. Run the smallest useful local syntax/static checks and the validation appropriate for the code and any Skill actually used. If a critical hardware or API fact remains unconfirmed, stop and ask for it; do not guess and do not deploy.
+8. Follow the per-request deployment rule exactly. Deployment is allowed only when that rule explicitly authorizes it, and it must happen after code and resource validation as the final modifying stage.
 
 Safety and reporting:
 - Work only inside the current workspace. Never inspect parent or sibling client directories.
@@ -175,7 +177,13 @@ def _run_skills(configured_skills: tuple[str, ...], deploy_mode: str) -> list[st
             f"Required Agent Skill is not enabled: {', '.join(missing)}",
             retryable=False,
         )
-    return required
+    selected = [UIFLOW_CODER_SKILL]
+    if UIFLOW_UI_DESIGNER_SKILL in configured_skills:
+        selected.append(UIFLOW_UI_DESIGNER_SKILL)
+    selected.append(M5STACK_ASSISTANT_SKILL)
+    if deploy_mode == "agent":
+        selected.append(DEVICE_PUSH_SKILL)
+    return selected
 
 
 def _agent_env(

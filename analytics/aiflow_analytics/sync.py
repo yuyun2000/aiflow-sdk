@@ -47,6 +47,10 @@ class SyncService:
         self._periodic_thread: threading.Thread | None = None
         self._manual_thread: threading.Thread | None = None
         self._active: dict[str, Any] | None = None
+        # The recent poll cursor advances only after a successful window import.
+        # Keeping it in memory avoids rescanning a stalled latest event forever;
+        # a restart still falls back to the database watermark plus the overlap.
+        self._recent_sync_end_ms: int | None = None
 
     @property
     def timezone(self) -> ZoneInfo:
@@ -151,10 +155,12 @@ class SyncService:
                         fallback_checked=fallback_checked,
                     )
                 LOGGER.info(
-                    "Synced %s fetched=%d inserted=%d assembled=%d turns=%d errors=%d",
+                    "Synced %s fetched=%d inserted=%d duplicates=%d "
+                    "assembled=%d turns=%d errors=%d",
                     current,
                     result["fetched"],
                     result["inserted"],
+                    result["duplicates"],
                     result["assembled"],
                     result["turns"],
                     result["errors"],
@@ -175,29 +181,35 @@ class SyncService:
 
     def sync_recent(self) -> dict[str, int]:
         now = datetime.now(self.timezone)
+        start_ms, end_ms = self._recent_window(now)
+        result = self._sync_window(
+            start_ms,
+            end_ms,
+            start_label=datetime.fromtimestamp(start_ms / 1000, tz=self.timezone).isoformat(),
+            end_label=now.isoformat(),
+        )
+        self._recent_sync_end_ms = max(self._recent_sync_end_ms or end_ms, end_ms)
+        return result
+
+    def _recent_window(self, now: datetime) -> tuple[int, int]:
+        """Return the next recent window while retaining the configured overlap."""
         configured_start = datetime.combine(
             date.fromisoformat(self.settings.analytics_start_date),
             time.min,
             tzinfo=self.timezone,
         )
-        latest_ms = self.database.latest_event_time_ms()
-        if latest_ms is None:
-            start = max(
-                configured_start,
-                now - timedelta(minutes=self.settings.sync_overlap_minutes),
-            )
+        now_ms = milliseconds(now)
+        configured_start_ms = milliseconds(configured_start)
+        overlap_ms = self.settings.sync_overlap_minutes * 60_000
+        if self._recent_sync_end_ms is not None:
+            start_ms = max(configured_start_ms, self._recent_sync_end_ms - overlap_ms)
         else:
-            latest = datetime.fromtimestamp(latest_ms / 1000, tz=self.timezone)
-            start = max(
-                configured_start,
-                latest - timedelta(minutes=self.settings.sync_overlap_minutes),
-            )
-        return self._sync_window(
-            milliseconds(start),
-            milliseconds(now),
-            start_label=start.isoformat(),
-            end_label=now.isoformat(),
-        )
+            latest_ms = self.database.latest_event_time_ms()
+            if latest_ms is None:
+                start_ms = max(configured_start_ms, now_ms - overlap_ms)
+            else:
+                start_ms = max(configured_start_ms, latest_ms - overlap_ms)
+        return start_ms, now_ms
 
     def _sync_missing_history(self, start_date: date, today: date) -> None:
         """Retry only missing clean days before today, without touching completed days."""
@@ -215,6 +227,9 @@ class SyncService:
             # The current day is intentionally included once at startup and is never
             # marked in sync_days, so every service restart refreshes today's window.
             self.sync_range(start_date, today)
+            # The initial range already covers the current day. Start the periodic
+            # cursor at startup completion instead of using an old latest event.
+            self._recent_sync_end_ms = milliseconds(datetime.now(self.timezone))
         except Exception as exc:
             LOGGER.error("Initial analytics sync failed: %s: %s", type(exc).__name__, exc)
         while not self._stop.wait(self.settings.sync_interval_seconds):
@@ -295,6 +310,14 @@ class SyncService:
                 self._periodic_thread and self._periodic_thread.is_alive()
             ),
             "active": dict(self._active) if self._active else None,
+            "recent_sync_end": (
+                datetime.fromtimestamp(
+                    self._recent_sync_end_ms / 1000,
+                    tz=self.timezone,
+                ).isoformat()
+                if self._recent_sync_end_ms is not None
+                else None
+            ),
             "historical_sync_needed": self.database.historical_sync_needed(
                 start_date.isoformat(), historical_end.isoformat()
             ),

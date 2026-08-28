@@ -48,7 +48,7 @@
     "permission_mode": "dontAsk",
     "sandbox_enabled": true,
     "allowed_tools": ["Read", "Write", "Edit", "Glob", "Grep", "Bash"],
-    "skills": ["uiflow2-coder", "m5stack-assistant", "aiflow-device-push"]
+    "skills": ["uiflow2-coder", "uiflow2-ui-designer", "m5stack-assistant", "aiflow-device-push"]
   },
   "skills": {
     "directory": "./skills"

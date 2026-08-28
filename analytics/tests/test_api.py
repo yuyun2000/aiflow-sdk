@@ -51,6 +51,7 @@ def test_health_auth_dashboard_and_turn_detail(settings, database) -> None:
         status_payload = client.get("/api/v1/status", headers=headers).json()
         status_config = status_payload["config"]
         assert status_config["tls_page_size"] == 100
+        assert status_config["sync_overlap_minutes"] == 15
         assert status_payload["sync"]["historical_sync_needed"] is True
         assert client.get("/api/v1/overview").status_code == 401
         overview = client.get(

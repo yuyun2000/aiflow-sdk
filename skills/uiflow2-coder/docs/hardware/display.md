@@ -18,18 +18,20 @@ A lcd display library
 - Suitable for simple interactive UI elements.
 - **Access via**: `M5.Widgets.Label()`, `M5.Widgets.Image()`, `M5.Widgets.Rectangle()`, etc.
 - **Important**: `M5.Widgets` provides UI component **classes**, not drawing methods.
+- **Recommendation**: For new interactive UI projects, prefer M5UI/LVGL. Use M5.Widgets for simple or legacy UI components.
 
 #### 3. M5UI
 
 - A high-level UI framework based on LVGL.
 - Provides page management, multi-widget layouts, and unified event handling.
+- **Recommendation**: Prefer M5UI/LVGL for new interactive UI projects.
 
 #### Usage Tips
 
 - ⚠️ Do not mix M5GFX, M5Widgets, and M5UI simultaneously, as it may cause rendering issues or event conflicts.
 - For graphics-only drawing → use M5GFX.
 - For simple interactive widgets → use M5Widgets.
-- For multi-page UI → use M5UI.
+- For multi-page UI → use M5UI/LVGL (recommended for new projects).
 
 #### Common Mistakes to Avoid
 
@@ -57,27 +59,33 @@ def setup():
     M5.begin()
     Widgets.setRotation(1)
     Widgets.fillScreen(0x222222)
-    print((str("rotation: ") + str((M5.Lcd.getRotation()))))
-    print((str((str("w: ") + str((M5.Lcd.width())))) + str((str("h:") + str((M5.Lcd.height()))))))
-    M5.Lcd.setRotation(1)
-    M5.Lcd.clear(0x000000)
-    M5.Lcd.setTextColor(0x0000FF, 0x000000)
-    M5.Lcd.setCursor(200, 3)
-    M5.Lcd.printf("hello M5")
-    M5.Lcd.print("hello M5", 0x6600CC)
-    M5.Lcd.drawImage("/flash/res/img/default.png", 0, 0)
-    M5.Lcd.drawQR("Hello", 220, 40, 100, 1)
-    M5.Lcd.drawCircle(30, 80, 20, 0x3333FF)
-    M5.Lcd.fillCircle(80, 80, 20, 0x009900)
-    M5.Lcd.drawEllipse(60, 140, 50, 30, 0x00FF00)
-    M5.Lcd.fillEllipse(60, 140, 30, 20, 0xFFFF00)
-    M5.Lcd.drawLine(115, 10, 115, 60, 0xFF0000)
-    M5.Lcd.drawRect(125, 10, 40, 30, 0xFF0000)
-    M5.Lcd.fillRect(125, 50, 40, 30, 0x00FF00)
-    M5.Lcd.drawTriangle(135, 150, 110, 190, 160, 190, 0x00FF00)
-    M5.Lcd.fillTriangle(145, 150, 170, 190, 190, 150, 0x0000FF)
-    M5.Lcd.drawArc(10, 180, 40, 45, 0, 90, 0xFFFF00)
-    M5.Lcd.fillArc(20, 190, 40, 45, 0, 90, 0x00FFFF)
+
+    print((str("rotation: ") + str((M5.Display.getRotation()))))
+    print(
+        (
+            str((str("w: ") + str((M5.Display.width()))))
+            + str((str("h:") + str((M5.Display.height()))))
+        )
+    )
+    M5.Display.setRotation(1)
+    M5.Display.clear(0x000000)
+    M5.Display.setTextColor(0x0000FF, 0x000000)
+    M5.Display.setCursor(200, 3)
+    M5.Display.printf("hello M5")
+    M5.Display.print("hello M5", 0x6600CC)
+    M5.Display.drawImage("/flash/res/img/default.png", 0, 0)
+    M5.Display.drawQR("Hello", 220, 40, 100, 1)
+    M5.Display.drawCircle(30, 80, 20, 0x3333FF)
+    M5.Display.fillCircle(80, 80, 20, 0x009900)
+    M5.Display.drawEllipse(60, 140, 50, 30, 0x00FF00)
+    M5.Display.fillEllipse(60, 140, 30, 20, 0xFFFF00)
+    M5.Display.drawLine(115, 10, 115, 60, 0xFF0000)
+    M5.Display.drawRect(125, 10, 40, 30, 0xFF0000)
+    M5.Display.fillRect(125, 50, 40, 30, 0x00FF00)
+    M5.Display.drawTriangle(135, 150, 110, 190, 160, 190, 0x00FF00)
+    M5.Display.fillTriangle(145, 150, 170, 190, 190, 150, 0x0000FF)
+    M5.Display.drawArc(10, 180, 40, 45, 0, 90, 0xFFFF00)
+    M5.Display.fillArc(20, 190, 40, 45, 0, 90, 0x00FFFF)
 
 def loop():
     M5.update()
@@ -106,14 +114,19 @@ import M5
 from M5 import *
 
 title0 = None
+canvas_rmy = None
 
 def setup():
-    global title0
+    global title0, canvas_rmy
+
     M5.begin()
     Widgets.setRotation(1)
     Widgets.fillScreen(0x222222)
-    title0 = Widgets.Title("Display canvas example", 3, 0xFFFFFF, 0x0000FF, Widgets.FONTS.DejaVu18)
-    canvas_rmy = M5.Lcd.newCanvas(100, 100, 2, True)
+    title0 = Widgets.Title(
+        "Display canvas example", 3, 0xFFFFFF, 0x0000FF, Widgets.FONTS.Montserrat18
+    )
+
+    canvas_rmy = M5.Display.newCanvas(100, 100, 2, True)
     canvas_rmy.drawCircle(30, 30, 20, 0xFFFFFF)
     canvas_rmy.drawCircle(30, 50, 20, 0xFFFFFF)
     canvas_rmy.drawCircle(50, 40, 20, 0xFFFFFF)
@@ -121,7 +134,7 @@ def setup():
     print((str("colro depth: ") + str((canvas_rmy.getColorDepth()))))
 
 def loop():
-    global title0
+    global title0, canvas_rmy
     M5.update()
 
 if __name__ == "__main__":
@@ -216,10 +229,10 @@ Display.height()
 
         Rotation values:
 
-        - 1: 0° rotation
-        - 2: 90° rotation
-        - 3: 180° rotation
-        - 4: 270° rotation
+        - 0: 0° rotation
+        - 1: 90° rotation
+        - 2: 180° rotation
+        - 3: 270° rotation
 
 ```python
 Display.getRotation()
@@ -242,11 +255,11 @@ Display.getCursor()
 
         Set the rotation of the display.
 
-        - Parameter `r` (`int`): rotation value (1~4)
-            - 1: 0° rotation
-            - 2: 90° rotation
-            - 3: 180° rotation
-            - 4: 270° rotation
+        - Parameter `r` (`int`): rotation value (0~3)
+            - 0: 0° rotation
+            - 1: 90° rotation
+            - 2: 180° rotation
+            - 3: 270° rotation
 
 ```python
 Display.setRotation(2)

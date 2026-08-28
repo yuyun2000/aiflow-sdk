@@ -143,6 +143,9 @@ def test_conversation_turn_filters_detail_and_quality(database) -> None:
     assert quality["turns"]["missing_terminal"] == 0
     assert quality["turns"]["missing_agent_result"] == 0
     assert quality["records"]["incomplete_events"] == 0
+    assert "not restricted to the requested analytics period" in quality["notes"][
+        "duplicate_fetches"
+    ]
 
 
 def test_device_metrics_exclude_missing_mac_and_normalize_formats(database) -> None:

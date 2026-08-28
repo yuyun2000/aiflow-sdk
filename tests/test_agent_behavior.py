@@ -15,6 +15,7 @@ from aiflow_server.agent import (
     M5STACK_MCP_TOOLS,
     SYSTEM_APPEND,
     UIFLOW_CODER_SKILL,
+    UIFLOW_UI_DESIGNER_SKILL,
     AgentError,
     _StreamMessageTracker,
     _ToolResultDeduplicator,
@@ -58,6 +59,7 @@ from aiflow_server.workspaces import WorkspaceManager
 def test_system_prompt_keeps_domain_and_makes_skill_order_advisory():
     assert "only handles M5Stack UIFlow2/MicroPython programming" in SYSTEM_APPEND
     assert "Prefer consulting the uiflow2-coder Skill" in SYSTEM_APPEND
+    assert "Use uiflow2-ui-designer when the task includes interface layout" in SYSTEM_APPEND
     assert "recommendation, not a tool-order gate" in SYSTEM_APPEND
     assert "It may be used before uiflow2-coder" in SYSTEM_APPEND
     assert "first tool call must invoke" not in SYSTEM_APPEND
@@ -90,20 +92,31 @@ def test_system_prompt_uses_user_language_instead_of_tool_context_language():
 
 
 def test_skill_selection_exposes_device_push_only_for_agent_mode():
-    configured = (M5STACK_ASSISTANT_SKILL, UIFLOW_CODER_SKILL, DEVICE_PUSH_SKILL, "other-skill")
+    configured = (
+        M5STACK_ASSISTANT_SKILL,
+        UIFLOW_CODER_SKILL,
+        UIFLOW_UI_DESIGNER_SKILL,
+        DEVICE_PUSH_SKILL,
+        "other-skill",
+    )
 
-    expected_coding = [UIFLOW_CODER_SKILL, M5STACK_ASSISTANT_SKILL]
+    expected_coding = [UIFLOW_CODER_SKILL, UIFLOW_UI_DESIGNER_SKILL, M5STACK_ASSISTANT_SKILL]
     assert _run_skills(configured, "none") == expected_coding
     assert _run_skills(configured, "server") == expected_coding
     assert _run_skills(configured, "agent") == [*expected_coding, DEVICE_PUSH_SKILL]
 
+    assert _run_skills((UIFLOW_CODER_SKILL, M5STACK_ASSISTANT_SKILL), "none") == [
+        UIFLOW_CODER_SKILL,
+        M5STACK_ASSISTANT_SKILL,
+    ]
+
     with pytest.raises(AgentError, match="aiflow-device-push") as caught:
-        _run_skills((UIFLOW_CODER_SKILL, M5STACK_ASSISTANT_SKILL), "agent")
+        _run_skills((UIFLOW_CODER_SKILL, UIFLOW_UI_DESIGNER_SKILL, M5STACK_ASSISTANT_SKILL), "agent")
     assert caught.value.code == "required_skill_missing"
 
 
 def test_runtime_tool_policy_enables_skill_and_official_mcp_tools():
-    skills = [UIFLOW_CODER_SKILL, M5STACK_ASSISTANT_SKILL]
+    skills = [UIFLOW_CODER_SKILL, UIFLOW_UI_DESIGNER_SKILL, M5STACK_ASSISTANT_SKILL]
     tools, allowed = _agent_tools(("Read", "Write", "Bash", "Read"), skills, True)
 
     assert tools == ["Read", "Write", "Bash", "Skill"]
@@ -236,9 +249,9 @@ def test_workspace_hides_target_and_prunes_push_skill_without_authorization(tmp_
 
     selected = workspaces.sync_skills(
         workspace,
-        [UIFLOW_CODER_SKILL, M5STACK_ASSISTANT_SKILL],
+        [UIFLOW_CODER_SKILL, UIFLOW_UI_DESIGNER_SKILL, M5STACK_ASSISTANT_SKILL],
     )
-    assert selected == [UIFLOW_CODER_SKILL, M5STACK_ASSISTANT_SKILL]
+    assert selected == [UIFLOW_CODER_SKILL, UIFLOW_UI_DESIGNER_SKILL, M5STACK_ASSISTANT_SKILL]
     assert not workspace.joinpath(".claude", "skills", DEVICE_PUSH_SKILL).exists()
 
     workspaces.write_device_config(

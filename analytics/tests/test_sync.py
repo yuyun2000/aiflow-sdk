@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from aiflow_analytics.sync import SyncService
+from aiflow_analytics.tls_client import milliseconds
 
 from .fixtures import complete_turn
 
@@ -99,6 +100,58 @@ def test_current_day_is_not_marked_so_startup_can_refresh_it(settings, database)
 
     assert database.day_is_synced((today - timedelta(days=1)).isoformat()) is True
     assert database.day_is_synced(today.isoformat()) is False
+
+
+def test_recent_sync_window_slides_from_last_successful_end(settings, database) -> None:
+    class RecordingTLSClient:
+        configured = True
+        last_search_used_fallback = False
+
+        def __init__(self) -> None:
+            self.windows: list[tuple[int, int]] = []
+
+        def search(self, start_ms: int, end_ms: int, query: str | None = None):
+            self.windows.append((start_ms, end_ms))
+            return []
+
+    client = RecordingTLSClient()
+    service = SyncService(settings, database, client)  # type: ignore[arg-type]
+    previous_end = milliseconds(
+        datetime.now(ZoneInfo(settings.timezone)) - timedelta(minutes=1)
+    )
+    service._recent_sync_end_ms = previous_end
+
+    service.sync_recent()
+    service.sync_recent()
+
+    first_start, first_end = client.windows[0]
+    second_start, second_end = client.windows[1]
+    overlap_ms = settings.sync_overlap_minutes * 60_000
+    assert first_start == previous_end - overlap_ms
+    assert second_start == first_end - overlap_ms
+    assert second_start >= first_start
+    assert service._recent_sync_end_ms == second_end
+
+
+def test_recent_sync_cursor_does_not_advance_after_failure(settings, database) -> None:
+    class FailingTLSClient:
+        configured = True
+        last_search_used_fallback = False
+
+        def search(self, _start_ms: int, _end_ms: int, query: str | None = None):
+            raise RuntimeError("temporary TLS failure")
+
+    client = FailingTLSClient()
+    service = SyncService(settings, database, client)  # type: ignore[arg-type]
+    previous_end = milliseconds(
+        datetime.now(ZoneInfo(settings.timezone)) - timedelta(minutes=1)
+    )
+    service._recent_sync_end_ms = previous_end
+
+    with pytest.raises(RuntimeError, match="temporary TLS failure"):
+        service.sync_recent()
+
+    assert service._recent_sync_end_ms == previous_end
 
 
 def test_manual_trigger_runs_in_background(settings, database) -> None:

@@ -149,8 +149,9 @@ http://<服务器地址>:5090/
 - `AIFLOW_ANALYTICS_TLS_PAGE_SIZE` 应保持在 `1` 到 `100`；这是 Volcengine `SearchLogsV2` 的单页上限。旧配置写成更大的值时，客户端会自动按 `100` 请求并记录警告。
 - 已成功完成的历史日写入 `sync_days`，默认不重复拉取；只有实际取到过记录，或通配查询已确认该日没有目标事件，才算完成。旧版本留下的 `fetched=0` 未验证标记、缺少成功标记或上次有解析错误的日期会在后续周期自动重试。
 - 每次服务启动都会重新拉取启动日的当天窗口；当天不会写入 `sync_days`，所以重启后仍会刷新当天日志。启动历史回填失败后，周期任务会先补齐历史缺口，再同步最近窗口，不需要再次手动删除数据库。
-- 当天每 `AIFLOW_ANALYTICS_SYNC_INTERVAL_SECONDS` 秒同步，并向前重叠 `AIFLOW_ANALYTICS_SYNC_OVERLAP_MINUTES` 分钟。
+- 当天每 `AIFLOW_ANALYTICS_SYNC_INTERVAL_SECONDS` 秒同步，并向前重叠 `AIFLOW_ANALYTICS_SYNC_OVERLAP_MINUTES` 分钟。尚未建立游标时使用数据库中的最新逻辑事件时间；启动逐日同步成功后直接把游标置于启动完成时间；后续使用上一次成功同步的结束时间向前滑动，即使没有新事件也不会固定重扫同一窗口。进程重启后会重新从最新事件时间加重叠窗口启动。重叠时长应覆盖 TLS 最长入库延迟，超出该窗口的极晚日志需通过历史同步补回。
 - 重叠、分页重复和超时重发均由 `record_id` 幂等处理。
+- 数据质量中的“累计重复物理读取”是所有已完成同步运行中被 `record_id` 跳过的记录总数，不受页面日期筛选限制；它反映读取开销，不代表重复任务、重复 Token 或重复费用。
 - `POST /api/v1/sync` 只启动后台线程；同一时间只允许一个同步任务。
 
 ## 鉴权
@@ -184,7 +185,7 @@ Authorization: Bearer <AIFLOW_ANALYTICS_API_TOKEN>
 | `GET /api/v1/turns/{turn_id}` | 完整逻辑事件、工具与模型用量时间线 |
 | `GET /api/v1/data-quality` | 分块、解析、终态、partial 和工具配对质量 |
 
-`GET /api/v1/status` 的 `sync.historical_sync_needed=true` 表示开始日期到昨天仍有未成功回填的日期；后台周期任务会自动重试这些日期。当天不写入 `sync_days`，每次服务启动都会重新拉取当天窗口。
+`GET /api/v1/status` 的 `sync.historical_sync_needed=true` 表示开始日期到昨天仍有未成功回填的日期；后台周期任务会自动重试这些日期。`sync.recent_sync_end` 是当前进程最近一次成功增量同步的结束时间，进程重启后会暂时为空并在首轮同步完成后重新建立。当日不写入 `sync_days`，每次服务启动都会重新拉取当天窗口。
 
 ```bash
 curl -H "Authorization: Bearer $AIFLOW_ANALYTICS_API_TOKEN" \

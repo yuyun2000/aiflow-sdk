@@ -244,6 +244,7 @@ def settings_summary(settings: Settings) -> dict[str, object]:
         "tls_max_pages": settings.tls_max_pages,
         "sync_on_startup": settings.sync_on_startup,
         "sync_interval_seconds": settings.sync_interval_seconds,
+        "sync_overlap_minutes": settings.sync_overlap_minutes,
         "pricing_models": sorted(settings.model_pricing),
         "pricing_file": str(settings.model_pricing_file)
         if settings.model_pricing_file
