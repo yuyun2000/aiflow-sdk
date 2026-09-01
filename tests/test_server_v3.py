@@ -20,6 +20,7 @@ from aiflow_server.config import load_settings
 class FakeRunner:
     def __init__(self):
         self.calls = []
+        self.resume_session_ids = []
         self.cancelled = set()
         self.active = 0
         self.max_active = 0
@@ -44,8 +45,31 @@ class FakeRunner:
                 context.get("message_attachments", []),
             )
         )
+        self.resume_session_ids.append(context.get("session_id"))
         self.active += 1
         self.max_active = max(self.max_active, self.active)
+        if prompt in {"cancel-after-init", "cancel-after-resumed-init"}:
+            session_id = (
+                context.get("session_id")
+                if prompt == "cancel-after-resumed-init"
+                else "00000000-0000-4000-8000-000000000042"
+            )
+            await emit(
+                "agent_system",
+                {
+                    "source": "claude_sdk",
+                    "subtype": "init",
+                    "data": {
+                        "type": "system",
+                        "subtype": "init",
+                        "session_id": session_id,
+                    },
+                },
+            )
+            while not cancel_event.is_set():
+                await asyncio.sleep(0.01)
+            self.active -= 1
+            raise AgentCancelled()
         if prompt == "slow-before-model":
             while not cancel_event.is_set():
                 await asyncio.sleep(0.01)
@@ -853,6 +877,86 @@ def test_cancel_file_boundaries_and_conversation_reset(service):
     reset = client.post("/api/v3/conversation/reset", headers=headers, json={"keep_files": False})
     assert reset.status_code == 200
     assert client.get("/api/v3/files", headers=headers).json() == []
+
+
+def test_cancelled_task_persists_init_session_for_next_resume(service):
+    client, _, runner, _ = service
+    _, headers = create_context(client, "cancel-resume")
+    created = client.post(
+        "/api/v3/tasks/coding",
+        headers=headers,
+        json={"prompt": "cancel-after-init", "deploy_mode": "none"},
+    ).json()
+
+    deadline = time.monotonic() + 2
+    running = None
+    while time.monotonic() < deadline:
+        running = client.get(
+            f"/api/v3/tasks/{created['task_id']}",
+            headers=headers,
+        ).json()
+        if running["session_id"]:
+            break
+        time.sleep(0.01)
+    assert running is not None
+    session_id = "00000000-0000-4000-8000-000000000042"
+    assert running["session_id"] == session_id
+    assert client.get("/api/v3/project", headers=headers).json()["current_session_id"] == session_id
+
+    cancelled = client.post(
+        f"/api/v3/tasks/{created['task_id']}/cancel",
+        headers=headers,
+    )
+    assert cancelled.status_code == 200
+    terminal = wait_terminal(client, created["task_id"], headers)
+    assert terminal["status"] == "cancelled"
+    assert terminal["session_id"] == session_id
+
+    continued = client.post(
+        "/api/v3/tasks/coding",
+        headers=headers,
+        json={"prompt": "继续", "deploy_mode": "none"},
+    ).json()
+    assert wait_terminal(client, continued["task_id"], headers)["status"] == "completed"
+    assert runner.resume_session_ids[-1] == session_id
+
+
+def test_resumed_task_records_unchanged_init_session_before_cancel(service):
+    client, _, runner, _ = service
+    _, headers = create_context(client, "cancel-resumed-session")
+    initial = client.post(
+        "/api/v3/tasks/coding",
+        headers=headers,
+        json={"prompt": "initial", "deploy_mode": "none"},
+    ).json()
+    completed = wait_terminal(client, initial["task_id"], headers)
+    session_id = completed["session_id"]
+    assert session_id
+
+    resumed = client.post(
+        "/api/v3/tasks/coding",
+        headers=headers,
+        json={"prompt": "cancel-after-resumed-init", "deploy_mode": "none"},
+    ).json()
+    deadline = time.monotonic() + 2
+    running = None
+    while time.monotonic() < deadline:
+        running = client.get(
+            f"/api/v3/tasks/{resumed['task_id']}",
+            headers=headers,
+        ).json()
+        if running["session_id"]:
+            break
+        time.sleep(0.01)
+    assert running is not None
+    assert running["session_id"] == session_id
+    assert runner.resume_session_ids[-1] == session_id
+
+    assert client.post(
+        f"/api/v3/tasks/{resumed['task_id']}/cancel",
+        headers=headers,
+    ).status_code == 200
+    assert wait_terminal(client, resumed["task_id"], headers)["session_id"] == session_id
 
 
 def test_device_update_plan_and_no_global_listing(service):

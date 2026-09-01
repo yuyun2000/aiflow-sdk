@@ -1,6 +1,6 @@
 # Rendering Strategy
 
-这是 UIFlow2 显示任务的强制决策树。目标不是追求抽象层级，而是在可用固件上获得稳定、可读、可验证的画面。
+这是 UIFlow2 显示任务的客观决策树。目标不是追求抽象层级，而是在可用固件上获得稳定、可读、可验证的画面。
 
 ## 先探测，再初始化
 
@@ -41,13 +41,13 @@ def probe_m5ui():
 
 ### Level 2: m5ui.M5Canvas
 
-适用于自定义图形、仪表、图表装饰、图标、粒子和动画，同时仍需要 LVGL
-页面、触摸控件或样式。
+适用于自定义静态图形、仪表、图表装饰、图标，以及能够在单个 buffer 内完成提交的
+低频/简单动画，同时仍需要 LVGL 页面、触摸控件或样式。
 
 - 在同一个 `M5Page` 下创建 `M5Canvas`，不要把它当作 M5GFX Canvas。
 - 固定大小、固定颜色格式和复用 buffer；不要每帧重新创建。
 - 多个图元用 `begin_draw()`/`end_draw()` 批量提交。
-- 复杂整帧可创建前后两个 LVGL Canvas，在新帧完成后切换 `lv.obj.FLAG.HIDDEN`。
+- 只有连续整帧动画同时要求“不能暴露清除/半成品画面”且已确认 draw buffer/RAM 时，才创建前后两个 LVGL Canvas，在新帧完成后切换 `lv.obj.FLAG.HIDDEN`。此路径使用 raw `lv.canvas`、`lv.draw_buf_create()` 和复用的 `lv.draw_*_dsc_t`，不是把两个 `M5Canvas` 当作自动双缓冲。
 - Canvas z-order 要低于需要点击的控件，或明确设置不可点击属性并在页面结构中验证。
 
 `M5Canvas` 默认使用 ARGB8888，仍受 LVGL draw buffer 和目标内存限制。创建失败或运行掉帧时，减少
@@ -57,8 +57,10 @@ Canvas 区域、颜色格式、粒子数量和刷新频率；不要直接退回�
 
 适用于没有 m5ui、没有 LVGL，或资源预算明确不足但仍需要少量标签/图片组件的设备。
 
-- 使用 `M5.Widgets.Label`、`M5.Widgets.Image` 等已验证组件；它们默认直接绘制，
-  不是 LVGL 控件，也不自动提供双缓冲。
+- 使用 `M5.Widgets.Label`、`M5.Widgets.Image` 等已验证组件；当前 C 绑定还提供
+  `Title`、`Line`、`Circle`、`Triangle`、`Rectangle`、`QRCode`，没有 LVGL 语义按钮/
+  开关/列表。它们默认直接绘制，不是 LVGL 控件，也不自动提供双缓冲；交互要另接
+  `Btn*`/`M5.Touch` 并自行维护状态。
 - 静态背景用 `M5.Widgets.fillScreen()` 或父级显示对象初始化一次。
 - 低频文本更新可以使用 Label；动画和多图元合成改用父级的 M5GFX Canvas，
   完成后一次 `push()`。不要把顶层 `widgets.Image(use_sprite=True)` 的行为套到

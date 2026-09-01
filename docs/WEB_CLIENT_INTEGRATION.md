@@ -292,6 +292,7 @@ async function rerunSavedCode(deviceId) {
 - 文件下载：`GET /api/v3/files/{relativePath}`。
 - multipart 上传：`POST /api/v3/files`；不要手动上传 `.aiflow` 内部文件。
 - 取消：`POST /api/v3/tasks/{task_id}/cancel`。排队任务会立即释放容量。
+- 运行中任务取消后，服务保留 SDK 已初始化的会话 ID；同一 conversation 的下一条 Coding 消息会续接该会话。客户端不应为了“继续”自动调用 conversation reset，也不需要重发整段历史。取消点正在执行的响应或工具可能是 partial，已经写入项目工作区的文件不会自动回滚。
 - 新对话：`POST /api/v3/conversation/reset`。
 - 删除设备项目：`DELETE /api/v3/context?confirm=true`。
 

@@ -16,7 +16,9 @@ from aiflow_server.agent import (
     SYSTEM_APPEND,
     UIFLOW_CODER_SKILL,
     UIFLOW_UI_DESIGNER_SKILL,
+    AgentCancelled,
     AgentError,
+    ClaudeRunner,
     _StreamMessageTracker,
     _ToolResultDeduplicator,
     _agent_tools,
@@ -56,6 +58,104 @@ from aiflow_server.telemetry import TLS_EVENT_DATA_KEY
 from aiflow_server.workspaces import WorkspaceManager
 
 
+class _FakeCancellableClient:
+    def __init__(self, *, interrupt_error: Exception | None = None):
+        self.interrupt_error = interrupt_error
+        self.calls: list[str] = []
+
+    async def interrupt(self) -> None:
+        self.calls.append("interrupt")
+        if self.interrupt_error is not None:
+            raise self.interrupt_error
+
+    async def disconnect(self) -> None:
+        self.calls.append("disconnect")
+
+
+def test_runner_cancel_uses_stream_interrupt_without_immediate_disconnect():
+    runner = ClaudeRunner(settings=object(), workspaces=object())
+    client = _FakeCancellableClient()
+    runner._clients["task-interrupt"] = client
+
+    asyncio.run(runner.cancel("task-interrupt"))
+
+    assert client.calls == ["interrupt"]
+
+
+def test_runner_cancel_disconnects_when_stream_interrupt_fails():
+    runner = ClaudeRunner(settings=object(), workspaces=object())
+    client = _FakeCancellableClient(interrupt_error=RuntimeError("interrupt failed"))
+    runner._clients["task-fallback"] = client
+
+    asyncio.run(runner.cancel("task-fallback"))
+
+    assert client.calls == ["interrupt", "disconnect"]
+
+
+def test_runner_emits_queued_init_before_honoring_cancel(monkeypatch, tmp_path):
+    cancel_event = asyncio.Event()
+
+    class FakeSDKClient:
+        def __init__(self, *, options):
+            self.options = options
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+        async def query(self, prompt):
+            cancel_event.set()
+
+        async def receive_response(self):
+            yield SystemMessage(
+                subtype="init",
+                data={
+                    "type": "system",
+                    "subtype": "init",
+                    "session_id": "00000000-0000-4000-8000-000000000099",
+                },
+            )
+
+    settings = replace(
+        load_settings(),
+        data_dir=tmp_path,
+        enabled_skills=(UIFLOW_CODER_SKILL, M5STACK_ASSISTANT_SKILL),
+        m5stack_mcp_enabled=False,
+    )
+    workspaces = WorkspaceManager(settings)
+    runner = ClaudeRunner(settings, workspaces)
+    emitted = []
+
+    async def emit(event_type, data):
+        emitted.append((event_type, data))
+
+    monkeypatch.setattr("aiflow_server.agent.ClaudeSDKClient", FakeSDKClient)
+    with pytest.raises(AgentCancelled):
+        asyncio.run(
+            runner.run(
+                "task-cancel-race",
+                {
+                    "context_id": "context-cancel-race",
+                    "device": {
+                        "device_id": "device-cancel-race",
+                        "client_id": "client-cancel-race",
+                        "product": "CoreS3",
+                    },
+                    "message_attachments": [],
+                },
+                "build a clock",
+                "none",
+                emit,
+                cancel_event,
+            )
+        )
+
+    init_events = [data for event_type, data in emitted if event_type == "agent_system"]
+    assert init_events[0]["data"]["session_id"] == "00000000-0000-4000-8000-000000000099"
+
+
 def test_system_prompt_keeps_domain_and_makes_skill_order_advisory():
     assert "only handles M5Stack UIFlow2/MicroPython programming" in SYSTEM_APPEND
     assert "Prefer consulting the uiflow2-coder Skill" in SYSTEM_APPEND
@@ -77,6 +177,12 @@ def test_system_prompt_keeps_domain_and_makes_skill_order_advisory():
     assert "do not exceed it with optional investigation" in SYSTEM_APPEND
     assert "Avoid repeating tool calls" in SYSTEM_APPEND
     assert "finish the smallest complete deliverable" in SYSTEM_APPEND
+    assert "capability-to-value pass" in SYSTEM_APPEND
+    assert "confirmed onboard display exists, normally use it" in SYSTEM_APPEND
+    assert "if an IMU exists, consider orientation" in SYSTEM_APPEND
+    assert "Do not add unrelated sensors" in SYSTEM_APPEND
+    assert "do not infer a capability from a product name alone" in SYSTEM_APPEND
+    assert "Make the chosen hardware enhancement part of the runnable result" in SYSTEM_APPEND
 
 
 def test_system_prompt_uses_user_language_instead_of_tool_context_language():
@@ -162,6 +268,34 @@ def test_prompt_keeps_device_id_private_and_separates_deployment_modes():
     assert "service will deploy main.py" in server_prompt
     assert "run plan exactly once" in agent_prompt
     assert "one --execute deployment" in agent_prompt
+
+
+def test_prompt_turns_confirmed_capabilities_into_focused_hardware_enhancements():
+    prompt = _build_prompt(
+        "做一个温湿度监测程序",
+        {
+            "device_id": "private-device-id",
+            "client_id": "private-client-id",
+            "product": "CoreS3",
+            "capabilities": {
+                "display": "320x240",
+                "imu": True,
+                "touch": True,
+                "units": ["SHT30"],
+            },
+        },
+        "none",
+        [],
+        True,
+    )
+
+    assert "Capability-to-value design pass:" in prompt
+    assert "confirmed display should normally show useful live status" in prompt
+    assert "an IMU may add orientation" in prompt
+    assert "temperature, humidity" in prompt
+    assert "Keep the core request intact" in prompt
+    assert "verify every concrete API/product fact" in prompt
+    assert "Make the chosen enhancement part of the code" in prompt
 
 
 def test_attachment_only_prompt_does_not_fabricate_an_english_user_language():

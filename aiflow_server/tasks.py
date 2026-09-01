@@ -49,6 +49,18 @@ def _seconds_since(value: str | None) -> float | None:
     return max(0.0, (datetime.now(timezone.utc) - timestamp).total_seconds())
 
 
+def _initial_agent_session_id(event_type: str, data: dict[str, Any]) -> str | None:
+    if event_type != "agent_system" or data.get("subtype") != "init":
+        return None
+    system_data = data.get("data")
+    if not isinstance(system_data, dict):
+        return None
+    session_id = system_data.get("session_id")
+    if not isinstance(session_id, str) or not session_id.strip():
+        return None
+    return session_id.strip()
+
+
 class TaskManager:
     def __init__(
         self,
@@ -485,6 +497,7 @@ class TaskManager:
     async def _run_coding(self, task_id: str, context: dict[str, Any], request: dict[str, Any], cancel_event: asyncio.Event) -> None:
         heartbeat = asyncio.create_task(self._heartbeat(task_id, cancel_event))
         quota_session: ModelQuotaSession | None = None
+        persisted_session_id: str | None = None
         try:
             now = utc_now()
             self.storage.update_task(
@@ -524,6 +537,22 @@ class TaskManager:
             self.storage.update_task(task_id, stage="coding")
 
             async def emit(event_type: str, data: dict[str, Any]) -> None:
+                nonlocal persisted_session_id
+                session_id = _initial_agent_session_id(event_type, data)
+                if session_id and session_id != persisted_session_id:
+                    persisted = await asyncio.to_thread(
+                        self.storage.set_task_session_id,
+                        context["context_id"],
+                        task_id,
+                        session_id,
+                    )
+                    if not persisted:
+                        raise AgentError(
+                            "session_persistence_failed",
+                            "Claude session could not be linked to the active conversation",
+                            retryable=False,
+                        )
+                    persisted_session_id = session_id
                 await self._emit(task_id, event_type, data, agent_event=True)
 
             runner_context = {
@@ -564,8 +593,19 @@ class TaskManager:
             # The SDK's ResultMessage usage remains part of the task result for
             # observability only. Every individual HTTP model response has
             # already been settled by the model proxy.
-            self.storage.set_session_id(context["context_id"], result.session_id)
-            self.storage.update_task(task_id, session_id=result.session_id, stage="collecting_files")
+            persisted = await asyncio.to_thread(
+                self.storage.set_task_session_id,
+                context["context_id"],
+                task_id,
+                result.session_id,
+            )
+            if not persisted:
+                raise AgentError(
+                    "session_persistence_failed",
+                    "Claude session could not be linked to the active conversation",
+                    retryable=False,
+                )
+            self.storage.update_task(task_id, stage="collecting_files")
             workspace = self.workspaces.workspace_for(context["context_id"])
             files = self.workspaces.list_files(workspace)
             for item in files:

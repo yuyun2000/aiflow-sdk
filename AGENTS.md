@@ -66,6 +66,7 @@
 - SDK 实际提供的 thinking delta、最终块和中断 partial 必须经统一脱敏后进入公开任务事件；不得用空活动标记替代，也不得节流丢失。TLS 仍只上传最终块或一次 partial，避免重复。
 - 事件中必须脱敏模型密钥、令牌、`device_id`、`client_id`、绝对工作区路径和敏感工具参数。
 - 缺少关键硬件/API 事实或本地验证失败时停止部署，不猜测设备行为。
+- 用户需求是核心目标但不一定是完整规格；Coding Agent 应读取已确认的 `product`/`capabilities`，做一次能力到价值检查。确认有屏幕时，除非用户要求无头模式或与任务冲突，默认用屏幕展示状态、结果、趋势或告警；确认有 IMU、温湿度、光照、距离、空气质量等能力时，按相关性加入一个聚焦增强。不得仅为“用上硬件”堆无关功能，所有新增硬件 API 必须查官方 Skill/文档，且在最终说明中交代采用的增强。
 
 ## SSE And Task Semantics
 
@@ -77,6 +78,7 @@
 - 任务事件数据库保持 WAL；当前使用 `synchronous=NORMAL` 是针对慢虚拟磁盘的明确性能选择。变更该模式前必须测量事件写入延迟并说明断电持久性权衡。
 - 不要恢复每个模型 delta 都同步更新任务状态的行为。Agent 活跃时间允许节流写入，但公开文本事件本身不能被节流丢失。
 - SSE 等待使用任务订阅信号，不恢复固定间隔数据库轮询。
+- SDK `init` 返回的 `session_id` 必须立即原子写入当前 context 和 task，不能只等最终 `ResultMessage`；运行中取消优先使用 SDK interrupt，失败再 disconnect。这样同一 conversation 的下一条“继续”可以恢复取消前的 Agent 上下文，同时保留 partial 语义且不声称回滚已经执行的工具或文件修改。
 
 ## Security And Side Effects
 

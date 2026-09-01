@@ -51,6 +51,7 @@ M5STACK_MCP_TOOLS = (
     "mcp__m5stack__knowledge_feedback",
 )
 MAX_EVENT_TEXT = 32768
+AGENT_INTERRUPT_TIMEOUT_SECONDS = 5.0
 LOGGER = logging.getLogger(__name__)
 IMAGE_FILE_SUFFIXES = frozenset(
     {".avif", ".bmp", ".gif", ".ico", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
@@ -144,9 +145,12 @@ Workflow guidance for every accepted task:
 3. Use m5stack-assistant whenever an official product fact, screen specification, pin, electrical constraint, compatibility detail, firmware behavior, API fact, or troubleshooting conclusion is needed. It may be used before uiflow2-coder when resolving that fact is the logical next step. Do not perform redundant lookups in either Skill.
 4. When m5stack-assistant is needed, follow its rules: query the official M5Stack MCP with knowledge_search or knowledge_answer, never include secrets or customer/device identifiers, and do not guess when official evidence is absent.
 5. If reasonable re-checking confirms missing, contradictory, or incorrect official material, a broken official example, or an MCP tool failure, call knowledge_feedback as required by m5stack-assistant. Include reproducible context and accurate severity. Only say feedback was submitted after receiving a feedback_id. Do not report ordinary user-code bugs as official documentation bugs.
-6. Write the finished runnable program to main.py rather than only printing code. Handle relevant attachments under inputs/ according to the per-request model capability rule. For generated resources, write .aiflow/deploy.json with a resources array whose items contain file and optional devicePath fields. devicePath is a Flash-relative directory such as res/img/ or res/audio/, not a /flash runtime path and not a filename; omit it to use automatic placement. Include only non-code assets in that array; never list main.py, main_ota_temp.py, or another program selected as the deployment code.
-7. Run the smallest useful local syntax/static checks and the validation appropriate for the code and any Skill actually used. If a critical hardware or API fact remains unconfirmed, stop and ask for it; do not guess and do not deploy.
-8. Follow the per-request deployment rule exactly. Deployment is allowed only when that rule explicitly authorizes it, and it must happen after code and resource validation as the final modifying stage.
+6. Treat the user's request as the product goal, not necessarily the complete feature specification. Before coding, inspect the supplied product and capabilities and make a short capability-to-value pass: identify hardware that can make the requested result clearer, safer, more useful, or easier to operate. Consider the onboard display, buttons/touch, IMU, microphone/audio, camera, and declared Units/Modules/sensors such as temperature, humidity, light, distance, motion, and air quality. Use only capabilities actually supplied or confirmed by official documentation.
+7. Prefer a focused enhancement over a feature pile. If a confirmed onboard display exists, normally use it for a useful live status, result, trend, alert, or interaction view instead of leaving it blank, unless the user explicitly requests headless behavior or the display conflicts with the core task; if an IMU exists, consider orientation, gesture, shake/tilt control, motion state, or a calibration/diagnostic view when it fits the request; if environmental sensors exist, consider contextual readings, thresholds, history, or a related alert. Do not add unrelated sensors, network services, background recording, actuation, or privacy-sensitive behavior merely to use hardware. Preserve the requested core workflow when optional enhancement is unavailable or would make the program less reliable.
+8. Use the capability-to-value pass to decide which official facts to verify. Query m5stack-assistant/uiflow2-coder for the concrete product, display, IMU, Unit/Module, pin, driver, and API details before relying on them; do not infer a capability from a product name alone. If capabilities are missing or ambiguous, ask a concise clarification question or implement only confirmed hardware.
+9. Write the finished runnable program to main.py rather than only printing code. Handle relevant attachments under inputs/ according to the per-request model capability rule. For generated resources, write .aiflow/deploy.json with a resources array whose items contain file and optional devicePath fields. devicePath is a Flash-relative directory such as res/img/ or res/audio/, not a /flash runtime path and not a filename; omit it to use automatic placement. Include only non-code assets in that array; never list main.py, main_ota_temp.py, or another program selected as the deployment code.
+10. Run the smallest useful local syntax/static checks and the validation appropriate for the code and any Skill actually used. If a critical hardware or API fact remains unconfirmed, stop and ask for it; do not guess and do not deploy.
+11. Make the chosen hardware enhancement part of the runnable result, not just a suggestion in the explanation, and briefly tell the user what capability was used and why. If no confirmed capability adds value, say so and keep the implementation focused. Follow the per-request deployment rule exactly. Deployment is allowed only when that rule explicitly authorizes it, and it must happen after code and resource validation as the final modifying stage.
 
 Safety and reporting:
 - Work only inside the current workspace. Never inspect parent or sibling client directories.
@@ -320,6 +324,16 @@ def _build_prompt(
         "If the user request marker says that no natural-language text was provided, inspect the attached "
         "message files as the task input without treating this English wrapper as the user's language.\n\n"
         f"Device facts supplied by the paired client:\n{json.dumps(public_device, ensure_ascii=False)}\n\n"
+        "Capability-to-value design pass:\n"
+        "Treat the request as the core goal and the supplied device capabilities as an opportunity for a focused, "
+        "useful enhancement. Before coding, map confirmed hardware to the user's outcome. A confirmed display should "
+        "normally show useful live status, results, trends, or alerts instead of staying idle; an IMU may add orientation, "
+        "gesture, shake/tilt controls, motion state, or calibration when relevant; temperature, humidity, light, "
+        "distance, motion, air-quality, audio, camera, buttons, and touch may add contextual feedback or interaction. "
+        "Keep the core request intact, do not add unrelated hardware or risky background behavior, and verify every "
+        "concrete API/product fact with the available official Skills. Make the chosen enhancement part of the code "
+        "and briefly explain it in the final response. If a capability is missing or ambiguous, ask or use only "
+        "confirmed hardware.\n\n"
         f"Official knowledge service:\n{knowledge_instruction}\n\n"
         f"Model image capability:\n{image_instruction}\n\n"
         f"Deployment rule:\n{deploy_instruction}\n"
@@ -1251,36 +1265,33 @@ class ClaudeRunner:
                 await client.query(user_prompt)
 
                 async for message in client.receive_response():
-                    if cancel_event.is_set():
-                        raise AgentCancelled()
                     if isinstance(message, SystemMessage):
-                        if not _should_emit_system_message(message):
-                            continue
-                        system_tls_data = _sanitize_tls_event(
-                            message.data,
-                            workspace,
-                            event_secrets,
-                        )
-                        system_public = {
-                            "source": "claude_sdk",
-                            "stage": "agent_starting",
-                            "subtype": message.subtype,
-                            "data": _sanitize_event(message.data, workspace, event_secrets),
-                        }
-                        system_tls_payload = {
-                            "source": "claude_sdk",
-                            "stage": "agent_starting",
-                            "data": system_tls_data,
-                        }
-                        if not isinstance(system_tls_data, dict) or system_tls_data.get(
-                            "subtype"
-                        ) != message.subtype:
-                            system_tls_payload["subtype"] = message.subtype
-                        system_public[TLS_EVENT_DATA_KEY] = system_tls_payload
-                        await emit(
-                            "agent_system",
-                            system_public,
-                        )
+                        if _should_emit_system_message(message):
+                            system_tls_data = _sanitize_tls_event(
+                                message.data,
+                                workspace,
+                                event_secrets,
+                            )
+                            system_public = {
+                                "source": "claude_sdk",
+                                "stage": "agent_starting",
+                                "subtype": message.subtype,
+                                "data": _sanitize_event(message.data, workspace, event_secrets),
+                            }
+                            system_tls_payload = {
+                                "source": "claude_sdk",
+                                "stage": "agent_starting",
+                                "data": system_tls_data,
+                            }
+                            if not isinstance(system_tls_data, dict) or system_tls_data.get(
+                                "subtype"
+                            ) != message.subtype:
+                                system_tls_payload["subtype"] = message.subtype
+                            system_public[TLS_EVENT_DATA_KEY] = system_tls_payload
+                            await emit(
+                                "agent_system",
+                                system_public,
+                            )
                     elif isinstance(message, AssistantMessage):
                         response_id = stream_tracker.assistant_response_id(message)
                         metadata = {
@@ -1664,6 +1675,8 @@ class ClaudeRunner:
                             "agent_sdk_event",
                             sdk_payload,
                         )
+                    if cancel_event.is_set():
+                        raise AgentCancelled()
         except AgentError:
             raise
         except ClaudeSDKError as exc:
@@ -1706,9 +1719,23 @@ class ClaudeRunner:
             client = self._clients.get(task_id)
         if client is not None:
             try:
+                await asyncio.wait_for(
+                    client.interrupt(),
+                    timeout=AGENT_INTERRUPT_TIMEOUT_SECONDS,
+                )
+                return
+            except Exception as exc:  # noqa: BLE001 - any SDK/transport failure requires fallback
+                LOGGER.warning(
+                    "Claude interrupt failed; disconnecting task: error_type=%s",
+                    type(exc).__name__,
+                )
+            try:
                 await client.disconnect()
-            except Exception:
-                pass
+            except Exception as exc:  # noqa: BLE001 - disconnect is best-effort cleanup
+                LOGGER.warning(
+                    "Claude disconnect fallback failed: error_type=%s",
+                    type(exc).__name__,
+                )
 
     async def shutdown(self) -> None:
         async with self._lock:

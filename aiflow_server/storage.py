@@ -609,6 +609,33 @@ class Storage:
                 (session_id, utc_now(), context_id),
             )
 
+    def set_task_session_id(self, context_id: str, task_id: str, session_id: str) -> bool:
+        """Persist the resumable SDK session against the current conversation."""
+        now = utc_now()
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute(
+                """
+                SELECT tasks.conversation_id AS task_conversation_id,
+                       contexts.conversation_id AS context_conversation_id
+                FROM tasks
+                JOIN contexts ON contexts.context_id=tasks.context_id
+                WHERE tasks.task_id=? AND tasks.context_id=?
+                """,
+                (task_id, context_id),
+            ).fetchone()
+            if not row or row["task_conversation_id"] != row["context_conversation_id"]:
+                return False
+            db.execute(
+                "UPDATE tasks SET session_id=?, updated_at=? WHERE task_id=?",
+                (session_id, now, task_id),
+            )
+            db.execute(
+                "UPDATE contexts SET session_id=?, updated_at=? WHERE context_id=?",
+                (session_id, now, context_id),
+            )
+        return True
+
     def delete_context(self, context_id: str) -> None:
         with self.connect() as db:
             db.execute("DELETE FROM contexts WHERE context_id=?", (context_id,))

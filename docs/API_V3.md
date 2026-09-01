@@ -427,6 +427,8 @@ queued -> running -> completed
 
 排队任务立即取消并释放队列容量。正在执行的 Agent 会收到取消请求；已开始的设备 HTTP 推送只能尽力取消。
 
+Coding 任务一旦收到 Claude Code SDK 的初始化会话 ID，就会立即把它写入当前项目和任务，不等待最终 `ResultMessage`。因此运行中的任务被取消后，用户在同一 conversation 再发送“继续”仍会恢复取消前已经进入 SDK 会话的消息和工具上下文；正在执行的单个模型响应或工具调用仍可能只保留 partial，取消不会回滚已经写入工作区的文件。服务优先发送 SDK interrupt，并在 interrupt 失败时断开连接兜底。
+
 ## 8. SSE 与事件历史
 
 ### `GET /api/v3/tasks/{task_id}/events`

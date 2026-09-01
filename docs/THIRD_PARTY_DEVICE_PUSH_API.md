@@ -244,3 +244,73 @@ HTTP 请求成功表示：
 - 客户端可控文件名必须作为 multipart `filename` 原样发送。使用 cURL 时应给本地路径和 `filename` 加双引号；名称包含双引号时需使用 cURL 7.81+ 的 `--form-escape`，避免文件名被改写。
 - 使用 cURL 上传源代码文件时应使用 `--data-binary`，避免换行或内容被表单编码修改。
 - HTTP 成功仅确认服务端已提交推送，设备执行和文件处理结果需要通过设备状态或 ACK 另行确认。
+
+## 6. 只读网络诊断
+
+推送出现 `curl: (28)` 或长时间无响应时，应在实际运行 `aiflow_push.py` 的服务器上执行诊断，
+这样测到的是同一台机器的 DNS、出口网络和 TLS 路径：
+
+```bash
+python3 scripts/diagnose_uiflow_push.py \
+  --role client \
+  --repeat 5 \
+  --interval 2 \
+  --timeout 10
+```
+
+服务器没有 `python` 命令时使用 `python3`；本脚本只依赖 Python 3 标准库。
+
+客户端和 UIFlow 运维应在各自的机器上针对同一个服务地址各运行一次。UIFlow 运维在网关主机上运行时，
+`--base-url` 应改成该主机实际监听的地址，例如 `http://127.0.0.1:8080/m5stack/`：
+
+```bash
+# 客户端/20.38：从实际发起推送的机器运行
+python3 scripts/diagnose_uiflow_push.py --role client --repeat 5 --interval 2 --timeout 10
+
+# UIFlow 网关主机：使用网关本机实际地址，端口按运维环境替换
+python3 scripts/diagnose_uiflow_push.py \
+  --role uiflow \
+  --base-url http://127.0.0.1:8080/m5stack/ \
+  --repeat 5 \
+  --interval 2 \
+  --timeout 10
+```
+
+脚本默认直接输出中文结论和下一步建议；需要英文时加 `--language en`。`RESP` 表示 HTTP 服务确实返回了非 2xx
+状态，或 HTTP `200` 正文中的应用层 `code` 已表示错误；它不是客户端连接超时。`timeout` 表示在限定时间内没有
+收到完整 HTTP 响应。只读模式只发 DNS、TCP、TLS、HTTP `GET` 和 `OPTIONS`，不发送 `POST`，不会上传代码或改变
+设备状态。`--json` 可输出 JSON Lines，
+方便把双方结果保存后发给运维：
+
+```bash
+python3 scripts/diagnose_uiflow_push.py --role client --repeat 5 --json \
+  > uiflow-client-diagnostic.jsonl
+```
+
+结论码的判断方式：
+
+| 结论码 | 含义 |
+| --- | --- |
+| `CLIENT_NETWORK_FAILURE` | 运行脚本的一方 DNS、TCP 或 TLS 失败，优先查该机器的出口网络。 |
+| `UIFLOW_BASE_GATEWAY_ERROR` | 只读探测中的基础路径返回 502/503/504，优先查 UIFlow 网关到该路径的上游；这还没有证明推送 POST 失败。 |
+| `ROUTE_REACHABLE_POST_UNTESTED` | 只读路由可达，但没有证明真实推送 POST。 |
+| `UIFLOW_POST_TIMEOUT` | 已发出 POST，但客户端在超时前没有收到完整响应；双方都超时则优先查 UIFlow 网关/上游。 |
+| `CLIENT_POST_TRANSPORT_FAILURE` | POST 在客户端传输层失败，没有收到 HTTP 状态。 |
+| `POST_ACCEPTED` | UIFlow 接受了 POST；不代表设备已经执行或 ACK。 |
+| `DEVICE_OFFLINE_REPORTED` | UIFlow 已进入业务逻辑并明确返回设备离线，优先查设备在线状态。 |
+| `UIFLOW_SERVER_ERROR` | UIFlow 对 POST 返回 5xx，提供输出和服务端日志给运维。 |
+| `UIFLOW_REJECTED_REQUEST` | UIFlow 返回 4xx，优先检查设备 ID 或请求契约。 |
+
+只读检查不能区分“POST 路由本身超时”和“设备 ACK 等待导致的服务端超时”。在明确授权、且只使用测试设备时，
+双方再各做一次单 POST 验证；脚本会强制 `--repeat 1`，默认发送一小段诊断代码：
+
+```bash
+python3 scripts/diagnose_uiflow_push.py \
+  --role client \
+  --execute \
+  --device-id 'replace-with-test-device-id' \
+  --timeout 120
+```
+
+该命令会改变指定测试设备上的代码，禁止使用生产设备。真实推送若需带资源或使用项目代码，仍应使用已有的
+`aiflow_push.py push-code ... --execute`，不要把诊断脚本的 `POST` 结果当作设备执行证明。
